@@ -20,8 +20,8 @@ jobs:
           chmod +x scripts/build-release.sh
           ./scripts/build-release.sh
           (cd release && sha256sum -c *.sha256)
-          if find . -path './.git' -prune -o -path './release' -prune -o -type f -name '*.sh' -exec grep -Il $'\r' {} + | grep -q .; then
-            echo 'CRLF line ending found in a shell script.' >&2
+          if find . -path './.git' -prune -o -path './release' -prune -o -type f \( -name '*.sh' -o -name '*.py' \) -exec grep -Il $'\r' {} + | grep -q .; then
+            echo 'CRLF line ending found in an executable script.' >&2
             exit 1
           fi
           tar -tvzf release/*.tar.gz | awk '$NF ~ /\/install\.sh$/ { found=1; if (substr($1, 4, 1) != "x") exit 1 } END { exit found ? 0 : 1 }'

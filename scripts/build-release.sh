@@ -7,8 +7,8 @@ NAME="reticulum-admin-$VERSION"
 OUT="$ROOT/release"
 STAGE="$OUT/$NAME"
 
-if find "$ROOT" -path "$ROOT/.git" -prune -o -path "$ROOT/release" -prune -o -type f -name '*.sh' -exec grep -Il "$(printf '\r')" {} + | grep -q .; then
-  echo "Refusing to package shell scripts with CRLF line endings." >&2
+if find "$ROOT" -path "$ROOT/.git" -prune -o -path "$ROOT/release" -prune -o -type f \( -name '*.sh' -o -name '*.py' \) -exec grep -Il "$(printf '\r')" {} + | grep -q .; then
+  echo "Refusing to package executable scripts with CRLF line endings." >&2
   exit 1
 fi
 

@@ -53,6 +53,12 @@ grep -F 'TMP=${TMPDIR:-/tmp}/$ARCHIVE_NAME' "$ROOT/install.sh" >/dev/null
 grep -F 'RETICULUM_ADMIN_VERSION=$APP_VERSION' "$ROOT/install.sh" >/dev/null
 grep -F 'sed "s/^RETICULUM_ADMIN_VERSION=.*/RETICULUM_ADMIN_VERSION=$APP_VERSION/"' "$ROOT/install.sh" >/dev/null
 
+# Every interpreter script in the payload must retain a Linux shebang.
+if find "$ROOT" -path "$ROOT/.git" -prune -o -path "$ROOT/release" -prune -o -type f \( -name '*.sh' -o -name '*.py' \) -exec grep -Il "$(printf '\r')" {} + | grep -q .; then
+  echo "CRLF line ending found in an executable script." >&2
+  exit 1
+fi
+
 # Docker group re-exec must use a fresh group context, verify daemon access,
 # and never fall back to an implicit sudo continuation.
 grep -F '1. Start a new shell with Docker access now' "$ROOT/install.sh" >/dev/null
