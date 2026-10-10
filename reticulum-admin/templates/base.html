@@ -1,1 +1,36 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ title }} · Reticulum Admin</title><link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}"></head><body><header><a class="brand" href="{{ url_for('dashboard') }}">Reticulum Admin</a>{% if session.admin %}<nav>{% for key,label in [('interfaces','Interfaces'),('clients','Connected Clients'),('timeline','Timeline'),('paths','Paths'),('announces','Announces'),('queues','Queues'),('blackholes','Blackholes'),('recovery','Incident Recovery'),('incident_history','Incident History'),('logs','Logs'),('configuration','Configuration'),('snapshots','Snapshots'),('system','System')] %}<a href="{{ url_for(key) }}">{{ label }}</a>{% endfor %}</nav><form action="{{ url_for('logout') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button>Sign out</button></form>{% endif %}</header><main>{% with messages=get_flashed_messages(with_categories=true) %}{% for category,message in messages %}<p class="flash {{ category }}">{{ message }}</p>{% endfor %}{% endwith %}{% block content %}{% endblock %}</main><footer>Reticulum Admin v{{ app_version }} · Access: {{ access_mode }} · Times: {{ server_timezone }} · Web UI has no Docker socket.</footer></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{ title }} · Reticulum Admin</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <header>
+    <a class="brand" href="{{ url_for('dashboard') }}">Reticulum Admin</a>
+    {% if session.admin %}
+    <nav>{% for key,label in [('interfaces','Interfaces'),('clients','Connected Clients'),('timeline','Timeline'),('paths','Paths'),('announces','Announces'),('queues','Queues'),('blackholes','Blackholes'),('recovery','Incident Recovery'),('incident_history','Incident History'),('logs','Logs'),('configuration','Configuration'),('snapshots','Snapshots'),('system','System')] %}<a href="{{ url_for(key) }}">{{ label }}</a>{% endfor %}</nav>
+    <form action="{{ url_for('logout') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button>Sign out</button></form>
+    {% endif %}
+  </header>
+  <main>{% with messages=get_flashed_messages(with_categories=true) %}{% for category,message in messages %}<p class="flash {{ category }}">{{ message }}</p>{% endfor %}{% endwith %}{% block content %}{% endblock %}</main>
+  <footer>Reticulum Admin v{{ app_version }} · Access: {{ access_mode }} · Times: {{ server_timezone }} · Web UI has no Docker socket.</footer>
+  <script>
+    document.addEventListener("submit", function (event) {
+      const form = event.target;
+      if (!form.action.endsWith("/configuration/preview")) return;
+      if (form.dataset.reviewSubmitting === "true") {
+        event.preventDefault();
+        return;
+      }
+      form.dataset.reviewSubmitting = "true";
+      const button = event.submitter || form.querySelector("button[type='submit'], button:not([type])");
+      if (button) {
+        button.disabled = true;
+        button.textContent = "Preparing review…";
+      }
+    });
+  </script>
+</body>
+</html>
