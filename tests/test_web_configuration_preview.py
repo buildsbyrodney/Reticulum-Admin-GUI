@@ -11,6 +11,7 @@ class WebConfigurationPreviewTests(unittest.TestCase):
         cls.temp = tempfile.TemporaryDirectory()
         os.environ["ADMIN_SECRET_KEY"] = "test-secret"
         os.environ["APP_DATA"] = cls.temp.name
+        os.environ["OBSERVATION_COLLECTOR"] = "false"
         sys.path.insert(0, str(Path(__file__).parents[1] / "reticulum-admin"))
         import app as web_app
         cls.web_app = web_app
@@ -40,6 +41,22 @@ class WebConfigurationPreviewTests(unittest.TestCase):
         self.assertTrue(preview["local_review"])
         self.assertIn({"section": "Public TCP", "key": "mode", "old": "full", "new": "boundary"}, preview["diff"])
         self.assertIn({"section": "Public TCP", "key": "passphrase", "old": "Changed", "new": "Changed"}, preview["diff"])
+
+    def test_review_route_does_not_ingest_or_write_observer_state(self):
+        old_ingest = self.web_app.ingest_snapshot
+        self.web_app.ingest_snapshot = lambda: (_ for _ in ()).throw(AssertionError("Review must not ingest observer state"))
+        try:
+            with self.web_app.app.test_client() as client:
+                with client.session_transaction() as state:
+                    state["admin"] = "test-admin"
+                    state["csrf"] = "csrf-test"
+                response = client.post("/configuration/preview", data={
+                    "csrf_token": "csrf-test", "kind": "global", "setting": "enable_transport", "value": "on", "reason": "test",
+                })
+        finally:
+            self.web_app.ingest_snapshot = old_ingest
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Review Configuration Change", response.data)
 
 
 if __name__ == "__main__":
