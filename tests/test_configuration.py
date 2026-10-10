@@ -19,6 +19,18 @@ class ConfigurationTests(unittest.TestCase):
         self.assertIn("custom_key = preserve",candidate); self.assertIn("# keep this comment",candidate)
         diff=cfg.redacted_diff(SAMPLE,candidate); secret=[x for x in diff if x["key"] == "passphrase"][0]
         self.assertEqual(secret["old"],"Changed"); self.assertEqual(secret["new"],"Changed")
+
+    def test_authenticated_configuration_model_redacts_ifac_values(self):
+        model = cfg.public_model(SAMPLE)
+        interface = model["interfaces"][0]
+        self.assertEqual(interface["fields"]["passphrase"], "Configured")
+
+    def test_configuration_model_recognises_reticulum_ifac_field_names(self):
+        text = """[reticulum]\n\n[[Shared TCP]]\ntype = TCPServerInterface\nifac_netname = shared\nifac_passphrase = shared-credential\nifac_size = 8\n"""
+        interface = cfg.public_model(text)["interfaces"][0]
+        self.assertEqual(interface["fields"]["ifac_netname"], "shared")
+        self.assertEqual(interface["fields"]["ifac_passphrase"], "Configured")
+        self.assertEqual(interface["fields"]["ifac_size"], "8")
     def test_validation_and_atomic_write(self):
         with self.assertRaises(ValueError): cfg.edit_text(SAMPLE,{"kind":"interface","name":"Public TCP","changes":{"listen_port":70000}})
         candidate=cfg.edit_text(SAMPLE,{"kind":"global","setting":"enable_transport","value":True}); cfg.atomic_write(candidate)
@@ -101,5 +113,30 @@ class ConfigurationTests(unittest.TestCase):
         finally:
             cfg.apply_runtime, cfg.health = old_runtime, old_health
         self.assertTrue(first["ok"]); self.assertEqual(first, second); self.assertIn("enabled = No", cfg.read_config())
+
+    def test_create_tcp_server_preserves_existing_configuration(self):
+        change = {"kind":"interface_create", "interface":{"name":"User TCP", "type":"TCPServerInterface", "enabled":True, "mode":"boundary", "fields":{"listen_ip":"0.0.0.0", "listen_port":4243, "network_name":"users", "passphrase":"secret", "ifac_size":8}}}
+        candidate = cfg.edit_text(SAMPLE, change)
+        self.assertIn("custom_key = preserve", candidate)
+        self.assertIn("[[User TCP]]", candidate)
+        self.assertIn("listen_port = 4243", candidate)
+        self.assertIn("passphrase = secret", candidate)
+        self.assertIn("Changed", [row["new"] for row in cfg.redacted_diff(SAMPLE, candidate) if row["key"] == "passphrase"])
+
+    def test_create_tcp_client_and_auto_interface(self):
+        tcp = {"kind":"interface_create", "interface":{"name":"Upstream", "type":"TCPClientInterface", "enabled":True, "mode":"full", "fields":{"target_host":"example.org", "target_port":4242}}}
+        auto = {"kind":"interface_create", "interface":{"name":"LAN", "type":"AutoInterface", "enabled":True, "mode":"full", "fields":{}}}
+        candidate = cfg.edit_text(cfg.edit_text(SAMPLE, tcp), auto)
+        self.assertIn("target_host = example.org", candidate); self.assertIn("[[LAN]]", candidate)
+
+    def test_create_rejects_duplicate_name_and_server_port(self):
+        duplicate = {"kind":"interface_create", "interface":{"name":"Public TCP", "type":"TCPServerInterface", "enabled":True, "mode":"full", "fields":{"listen_ip":"0.0.0.0", "listen_port":4243}}}
+        with self.assertRaisesRegex(ValueError, "already exists"): cfg.edit_text(SAMPLE, duplicate)
+        used = {"kind":"interface_create", "interface":{"name":"Other", "type":"TCPServerInterface", "enabled":True, "mode":"full", "fields":{"listen_ip":"0.0.0.0", "listen_port":4242}}}
+        with self.assertRaisesRegex(ValueError, "already configured"): cfg.edit_text(SAMPLE, used)
+
+    def test_delete_interface_preserves_other_sections(self):
+        candidate = cfg.edit_text(SAMPLE, {"kind":"interface_delete", "name":"Public TCP"})
+        self.assertNotIn("[[Public TCP]]", candidate); self.assertIn("custom_global = retain", candidate)
 
 if __name__ == "__main__": unittest.main()

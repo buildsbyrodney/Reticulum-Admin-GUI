@@ -82,7 +82,7 @@ Open the printed URL and create the required first administrator account.
 
 The `rnsd` container includes a non-networked observer that queries the local shared instance using `rnstatus --json --all --totals --queues --announce-stats --pr-stats` and `rnpath --table --json` every 15 seconds. It writes a sanitized snapshot into the persistent Reticulum directory. The GUI reads that snapshot only.
 
-Available data depends on the installed Reticulum interface and version. Dashboard, Interfaces, Timeline, Connected Clients, and Logs show fields only when Reticulum explicitly supplies them. Queue, RX/TX, announce, and path-request values appear when available. IFAC presence may be shown, but its passphrase/key is never displayed. Recent logs are redacted before display.
+Available data depends on the installed Reticulum interface and version. Dashboard, Interfaces, Timeline, Connected Clients, and Logs show fields only when Reticulum explicitly supplies them. Queue, RX/TX, announce, and path-request values appear when available. IFAC passphrases remain redacted; the Configuration editor shows only whether a passphrase is configured. Recent logs are redacted before display.
 
 SQLite lives at `data/admin/admin.db`. It stores password hashes, timeline events, connection history, labels/notes, and observer state. Timestamps are stored in UTC and rendered with `SERVER_TIMEZONE`.
 
@@ -144,3 +144,11 @@ rnsd/observer.py             fixed read-only Reticulum observer
 reticulum-admin/             Flask UI and persistent SQLite app data
 data/                         runtime state, ignored by Git
 ```
+
+## Interface provisioning and topology
+
+The Interfaces page can create, clone, or delete TCP Server, TCP Client, and AutoInterface definitions through purpose-based presets. Every provisioning action is reviewed, snapshotted, validated, applied by the management agent, and health-checked before it is accepted. Interface names and configured TCP listen endpoints must be unique. Deletion requires typed confirmation.
+
+The recommended starting pattern is Public TCP → Boundary, Local/RF → Internal, and Trusted Backbone → Full. It is a useful pattern, not a rule. Use separate IFAC credentials for ordinary user access and trusted backbone links. A TCP Server does not automatically become reachable from the Internet: firewall, NAT, and router configuration remain under the operator's control.
+
+For a physical Pi test: create a manual snapshot, add a TCP Server on an unused port, review/apply and verify `rnstatus`, connect a test client, clone it to a different port, delete the clone, add and disable/re-enable a TCP Client, then restore the original snapshot and reboot. Also exercise duplicate name, duplicate port, invalid port, blank TCP target, invalid IFAC size, and a forced-health-failure test mode without modifying production state.

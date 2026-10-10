@@ -48,6 +48,7 @@ def db():
       CREATE TABLE IF NOT EXISTS observer_state (state_key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS incidents (id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, admin TEXT NOT NULL, target_json TEXT NOT NULL, actions_json TEXT NOT NULL, preview_json TEXT NOT NULL, results_json TEXT, notes TEXT, status TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS config_changes (id INTEGER PRIMARY KEY, occurred_at INTEGER NOT NULL, admin TEXT NOT NULL, setting TEXT NOT NULL, old_value TEXT, new_value TEXT, snapshot_id TEXT, apply_method TEXT, result TEXT NOT NULL, rolled_back INTEGER NOT NULL DEFAULT 0, error TEXT);
+      CREATE TABLE IF NOT EXISTS ui_preferences (pref_key TEXT PRIMARY KEY, pref_value TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS events_filter_idx ON events(occurred_at, kind, interface_name, remote_ip);
       CREATE INDEX IF NOT EXISTS connections_active_idx ON connections(connection_key, status);
     """)
@@ -72,7 +73,7 @@ def csrf_token():
 
 @app.context_processor
 def common_values():
-    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.2.8")}
+    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.0")}
 
 def require_csrf():
     if not secrets.compare_digest(session.get("csrf", ""), request.form.get("csrf_token", "")): abort(400, "Invalid form token")
@@ -192,7 +193,7 @@ def management(path, body=None, timeout=None):
         return {"ok":False, "unknown":True, "error":"The management operation did not return a usable result. Reticulum may still have applied the change. Check current status before retrying.", "technical_error":str(error)}
 
 def record_config_change(result, change):
-    diff = result.get("diff") or []; setting = change.get("setting") or change.get("name") or "snapshot restore"
+    diff = result.get("diff") or []; setting = change.get("setting") or change.get("name") or (change.get("interface") or {}).get("name") or "snapshot restore"
     old = ", ".join(f"{x.get('section')}.{x.get('key')}={x.get('old')}" for x in diff)[:1000]
     new = ", ".join(f"{x.get('section')}.{x.get('key')}={x.get('new')}" for x in diff)[:1000]
     snapshot_id = (result.get("snapshot") or {}).get("id")
@@ -211,8 +212,69 @@ def update_config_view_cache(change):
             if item.get("name") == change.get("name"):
                 for key, value in (change.get("changes") or {}).items():
                     if key in ("enabled", "mode"): item[key] = "Yes" if value is True else "No" if value is False else str(value)
-                    else: item.setdefault("fields", {})[key] = "Configured" if "passphrase" in key else str(value)
+                    else: item.setdefault("fields", {})[key] = str(value)
                 break
+    elif change.get("kind") == "interface_create":
+        item = dict(change.get("interface") or {})
+        item["fields"] = dict(item.pop("fields", {}))
+        item["enabled"] = "Yes" if item.get("enabled", True) else "No"
+        CONFIG_VIEW_CACHE["config"].setdefault("interfaces", []).append(item)
+    elif change.get("kind") == "interface_delete":
+        config["interfaces"] = [item for item in config.get("interfaces", []) if item.get("name") != change.get("name")]
+
+MODE_HELP = {
+    "full": "Normal full Reticulum participation and announce propagation.",
+    "boundary": "Useful between an outside network and a protected internal segment; outside announces are not automatically propagated into Internal interfaces.",
+    "internal": "Marks a protected local segment such as RF or a private network. Remote paths can still be discovered on demand where Reticulum supports it.",
+    "gateway": "Provides gateway-style path discovery while still participating in routing.",
+    "point_to_point": "For a deliberate point-to-point link between known peers.",
+    "access_point": "For an access-point style interface where supported.",
+    "roaming": "For roaming-style operation where supported.",
+}
+
+PRESETS = {
+    "user_tcp": {"label":"User Access TCP", "type":"TCPServerInterface", "name":"Public TCP", "mode":"boundary", "listen_ip":"0.0.0.0", "listen_port":"4242", "help":"Use this when ordinary Reticulum users should connect to this node over TCP."},
+    "trusted_tcp": {"label":"Trusted Backbone TCP", "type":"TCPServerInterface", "name":"Trusted TCP", "mode":"full", "listen_ip":"0.0.0.0", "listen_port":"4243", "help":"For known operators or transport nodes deliberately linking network segments. Use separate IFAC credentials from user access."},
+    "tcp_client": {"label":"Trusted TCP Client", "type":"TCPClientInterface", "name":"Trusted Upstream", "mode":"full", "help":"Makes this node connect outward to another Reticulum TCP server."},
+    "auto": {"label":"AutoInterface", "type":"AutoInterface", "name":"Local Discovery", "mode":"full", "help":"Lets nearby Reticulum nodes discover each other over the local network without a TCP server."},
+    "protected": {"label":"Protected Local Segment", "type":"TCPServerInterface", "name":"Protected TCP", "mode":"internal", "listen_ip":"127.0.0.1", "listen_port":"4244", "help":"A starting point for a protected local segment. Internal is common for RF or private networks, but is not mandatory for every RF setup."},
+}
+
+def configuration_model():
+    cached = CONFIG_VIEW_CACHE.get("config")
+    if cached: return cached
+    result = management("/config", timeout=float(os.environ.get("MANAGEMENT_PREVIEW_TIMEOUT", "5")))
+    if result.get("ok") and result.get("config"):
+        CONFIG_VIEW_CACHE["config"] = result["config"]
+    return result.get("config", {})
+
+def make_interface_change(form):
+    purpose = form.get("purpose", "manual")
+    preset = PRESETS.get(purpose, {})
+    interface_type = form.get("interface_type") or preset.get("type")
+    fields = {}
+    for key in ("listen_ip", "target_host", "network_name"):
+        value = form.get(key, "").strip()
+        if value: fields[key] = value
+    for key in ("listen_port", "target_port"):
+        value = form.get(key, "").strip()
+        if value: fields[key] = int(value) if value.isdigit() else value
+    if form.get("ifac_enabled"):
+        if not form.get("network_name", "").strip() or not form.get("passphrase", ""):
+            raise ValueError("IFAC requires both a network name and a passphrase")
+        fields["passphrase"] = form["passphrase"]
+        if form.get("ifac_size_mode") == "custom":
+            bits = form.get("ifac_size_bits", "")
+            if not bits.isdigit() or int(bits) < 8 or int(bits) > 512 or int(bits) % 8: raise ValueError("Custom IFAC size must be a whole number of bytes from 8 to 512 bits")
+            fields["ifac_size"] = int(bits) // 8
+    return {"kind":"interface_create", "interface": {"name":form.get("name", "").strip(), "type":interface_type, "enabled":bool(form.get("enabled")), "mode":form.get("mode") or preset.get("mode", "full"), "fields":fields}}
+
+def preview_provision_change(change, reason, warning=None):
+    result = management("/config/preview", {"change":change}, timeout=float(os.environ.get("MANAGEMENT_PREVIEW_TIMEOUT", "5")))
+    if not result.get("ok"): raise ValueError(result.get("error", "Configuration validation failed"))
+    operation_id = f"CFG-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(3).upper()}"
+    session["config_change"] = {"change":change, "reason":reason[:240], "operation_id":operation_id}
+    return result, warning
 
 def display_config_value(value, secret_value=False):
     """Use the same safe values in a local review that the UI uses elsewhere."""
@@ -256,7 +318,7 @@ def system_info():
         values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line)
         memory = values.get("MemTotal", "Unavailable").strip()
     except OSError: pass
-    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.2.5"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
+    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.0"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
@@ -289,7 +351,8 @@ def dashboard():
     snap, interfaces, clients = ingest_snapshot(); configured = config_interfaces()
     with db() as con:
         recent = con.execute("SELECT * FROM events ORDER BY occurred_at DESC LIMIT 8").fetchall(); warnings = con.execute("SELECT COUNT(*) AS n FROM events WHERE severity='warning' AND occurred_at>?", (now()-86400,)).fetchone()["n"]
-    return render_template("dashboard.html", title="Dashboard", snap=snap, interfaces=interfaces, configured=configured, clients=clients, client_count=sum(x["client_count"] or 0 for x in interfaces), transport=transport_enabled(), recent=recent, warnings=warnings)
+        onboarding = con.execute("SELECT pref_value FROM ui_preferences WHERE pref_key='onboarding_dismissed'").fetchone() is None
+    return render_template("dashboard.html", title="Dashboard", snap=snap, interfaces=interfaces, configured=configured, clients=clients, client_count=sum(x["client_count"] or 0 for x in interfaces), transport=transport_enabled(), recent=recent, warnings=warnings, onboarding=onboarding)
 
 @app.get("/interfaces")
 @login_required
@@ -299,6 +362,72 @@ def interfaces():
     for name, item in by_name.items():
         if not any(row["name"] == name for row in rows): rows.append(item)
     return render_template("interfaces.html", title="Interfaces", rows=rows, error=snap.get("status_error"))
+
+@app.route("/interfaces/add", methods=["GET", "POST"])
+@login_required
+def interface_add():
+    if request.method == "POST":
+        require_csrf()
+        try:
+            change = make_interface_change(request.form)
+            preview, warning = preview_provision_change(change, request.form.get("reason", "Add interface"), "Creating a TCP Server does not automatically make it Internet reachable; firewall, NAT, or router configuration may still be required." if change["interface"]["type"] == "TCPServerInterface" else None)
+        except ValueError as error:
+            flash(str(error), "error"); return redirect(url_for("interface_add", purpose=request.form.get("purpose", "manual")))
+        return render_template("configuration_preview.html", title="Review New Interface", preview=preview, change=change, warning=warning)
+    purpose = request.args.get("purpose", "user_tcp")
+    return render_template("interface_form.html", title="Add Interface", presets=PRESETS, selected=purpose, values=PRESETS.get(purpose, {}), modes=MODE_HELP, clone=False)
+
+@app.route("/interfaces/<name>/clone", methods=["GET", "POST"])
+@login_required
+def interface_clone(name):
+    source = next((item for item in configuration_model().get("interfaces", []) if item.get("name") == name), None)
+    if not source: abort(404)
+    if request.method == "POST":
+        require_csrf()
+        try:
+            change = make_interface_change(request.form)
+            preview, warning = preview_provision_change(change, request.form.get("reason", f"Clone {name}"), "A cloned TCP server must use a different port from its source.")
+        except ValueError as error:
+            flash(str(error), "error"); return redirect(url_for("interface_clone", name=name))
+        return render_template("configuration_preview.html", title="Review Interface Clone", preview=preview, change=change, warning=warning)
+    values = {"type":source.get("type"), "name":f"{name} Copy", "mode":source.get("mode") or "full", **(source.get("fields") or {})}
+    if source.get("type") == "TCPServerInterface": values["listen_port"] = ""
+    return render_template("interface_form.html", title=f"Clone {name}", presets=PRESETS, selected="manual", values=values, modes=MODE_HELP, clone=True)
+
+@app.post("/interfaces/<name>/delete")
+@login_required
+def interface_delete(name):
+    require_csrf()
+    if not any(item.get("name") == name for item in configuration_model().get("interfaces", [])): abort(404)
+    _, observed, _ = ingest_snapshot(); active = next((item for item in observed if item.get("name") == name), {})
+    warning = "This interface currently has active clients or peers." if (active.get("client_count") or active.get("peer_count")) else "Deleting an interface removes its persistent configuration. A snapshot will be created first."
+    try: preview, _ = preview_provision_change({"kind":"interface_delete", "name":name}, f"Delete {name}", warning)
+    except ValueError as error: flash(str(error), "error"); return redirect(url_for("interfaces"))
+    return render_template("configuration_preview.html", title="Review Interface Deletion", preview=preview, change={"kind":"interface_delete", "name":name}, warning=warning, delete_confirmation=True)
+
+@app.get("/topology")
+@login_required
+def topology():
+    _, observed, _ = ingest_snapshot(); live = {item.get("name"):item for item in observed}; rows=[]
+    for configured in configuration_model().get("interfaces", []):
+        merged=dict(configured); merged.update({key:value for key,value in live.get(configured.get("name"), {}).items() if value is not None}); rows.append(merged)
+    warnings=[]; modes={str(item.get("mode", "")).lower() for item in rows}
+    if "full" in modes and "internal" in modes: warnings.append("A Full interface and an Internal interface are both configured. Review announce propagation for this topology.")
+    if transport_enabled() and any(item.get("type") == "TCPServerInterface" and str(item.get("mode", "")).lower() == "full" for item in rows): warnings.append("Transport Mode is enabled while a Full TCP Server interface is configured. Confirm this node is intended to route for other peers.")
+    for item in rows:
+        if item.get("type") == "TCPServerInterface" and not item.get("fields", {}).get("passphrase"): warnings.append(f"IFAC is disabled on TCP Server interface {item.get('name')}.")
+    return render_template("topology.html", title="Topology", rows=rows, warnings=warnings)
+
+@app.get("/help")
+@login_required
+def help_concepts(): return render_template("help.html", title="Help / Concepts", modes=MODE_HELP)
+
+@app.post("/onboarding/dismiss")
+@login_required
+def onboarding_dismiss():
+    require_csrf()
+    with db() as con: con.execute("INSERT INTO ui_preferences(pref_key,pref_value) VALUES('onboarding_dismissed','yes') ON CONFLICT(pref_key) DO UPDATE SET pref_value='yes'")
+    return redirect(request.referrer or url_for("dashboard"))
 
 @app.get("/clients")
 @login_required
@@ -411,11 +540,9 @@ def queues():
 @app.get("/configuration")
 @login_required
 def configuration():
-    cached = CONFIG_VIEW_CACHE.get("config")
-    result = {"config": cached, "ok": True} if cached else management("/config", timeout=float(os.environ.get("MANAGEMENT_PREVIEW_TIMEOUT", "5")))
-    if result.get("ok") and result.get("config"): CONFIG_VIEW_CACHE["config"] = result["config"]
+    config = configuration_model()
     with db() as con: changes=con.execute("SELECT * FROM config_changes ORDER BY occurred_at DESC LIMIT 50").fetchall()
-    return render_template("configuration.html", title="Configuration", config=result.get("config", {}), error=result.get("error"), changes=changes)
+    return render_template("configuration.html", title="Configuration", config=config, error=None if config else "Configuration data is temporarily unavailable.", changes=changes)
 
 @app.post("/configuration/preview")
 @login_required
@@ -443,6 +570,8 @@ def configuration_preview():
 def configuration_apply():
     require_csrf(); item=session.pop("config_change", None)
     if not item: abort(400, "No configuration change to apply")
+    if item["change"].get("kind") == "interface_delete" and request.form.get("delete_confirmation") != "DELETE INTERFACE":
+        abort(400, "Typed confirmation required")
     result=management("/config/apply", {"admin":session["admin"],"reason":item["reason"],"change":item["change"],"operation_id":item["operation_id"]})
     result.setdefault("operation_id", item["operation_id"])
     if result.get("ok"): update_config_view_cache(item["change"])

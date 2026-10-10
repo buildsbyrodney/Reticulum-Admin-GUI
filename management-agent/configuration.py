@@ -29,7 +29,9 @@ COMMON = {"enabled", "mode", "network_name", "passphrase", "ifac_size"}
 TYPE_FIELDS = {
     "TCPServerInterface": COMMON | {"listen_ip", "listen_port"},
     "TCPClientInterface": COMMON | {"target_host", "target_port"},
+    "AutoInterface": {"enabled", "mode", "network_name", "passphrase", "ifac_size"},
 }
+INTERFACE_TYPES = set(TYPE_FIELDS)
 
 def utc_now(): return datetime.now(timezone.utc).isoformat()
 def config_hash(text): return hashlib.sha256(text.encode()).hexdigest()
@@ -63,7 +65,10 @@ def public_model(text=None):
         if section.get("kind") != "interface": continue
         values = section["settings"]
         item = {"name": section["name"], "type": values.get("type"), "enabled": values.get("enabled"), "mode": values.get("mode"), "fields": {}}
-        for key in COMMON | {"listen_ip", "listen_port", "target_host", "target_port", "port", "frequency", "bandwidth", "txpower", "spreadingfactor", "codingrate"}:
+        for key in COMMON | {"ifac_netname", "ifac_passphrase", "listen_ip", "listen_port", "target_host", "target_port", "port", "frequency", "bandwidth", "txpower", "spreadingfactor", "codingrate"}:
+            # The browser only needs to know that a credential exists. Keeping
+            # it out of the public model prevents accidental disclosure in UI,
+            # browser history, screenshots, and cached configuration views.
             if key in values: item["fields"][key] = "Configured" if secret(key) else values[key]
         interfaces.append(item)
     return {"hash": config_hash(text), "global": {"enable_transport": global_settings.get("enable_transport", "No"), "loglevel": global_settings.get("loglevel")}, "interfaces": interfaces, "version": os.environ.get("RNS_VERSION", "1.5.7")}
@@ -90,7 +95,70 @@ def validate_change(change, text=None):
             if key in ("listen_ip", "target_host", "network_name", "passphrase", "port") and (not isinstance(value, str) or not value.strip() or len(value) > 255 or any(ord(c) < 32 for c in value)): raise ValueError("Invalid text value")
             if key == "ifac_size" and (not isinstance(value, int) or value < 1 or value > 512): raise ValueError("Invalid IFAC size")
         return
+    if kind == "interface_create":
+        validate_interface_definition(change.get("interface"), read_config() if text is None else text)
+        return
+    if kind == "interface_delete":
+        name = change.get("name")
+        section = parse(read_config() if text is None else text).get(name)
+        if not isinstance(name, str) or not section or section.get("kind") != "interface": raise ValueError("Unknown interface")
+        return
     raise ValueError("Unknown configuration operation")
+
+def valid_name(name):
+    return isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._:-]{0,79}", name or "") is not None
+
+def validate_interface_definition(interface, text):
+    if not isinstance(interface, dict): raise ValueError("Invalid interface definition")
+    name, interface_type = interface.get("name"), interface.get("type")
+    sections = parse(text)
+    if not valid_name(name): raise ValueError("Interface name must be 1–80 characters and use only letters, numbers, spaces, dots, underscores, colons, or hyphens")
+    if name in sections: raise ValueError(f'An interface named "{name}" already exists. Choose another name.')
+    if interface_type not in INTERFACE_TYPES: raise ValueError("Unsupported interface type")
+    fields = dict(interface.get("fields") or {})
+    fields["enabled"] = bool(interface.get("enabled", True))
+    fields["mode"] = str(interface.get("mode", "full")).lower()
+    # Reuse the edit validator for type, ports, IFAC size, and text fields.
+    synthetic = "[[candidate]]\ntype = %s\n" % interface_type
+    validate_change({"kind":"interface", "name":"candidate", "changes":fields}, synthetic)
+    if interface_type == "TCPServerInterface":
+        port = fields.get("listen_port")
+        if not isinstance(port, int): raise ValueError("Listen port is required")
+        address = fields.get("listen_ip", "0.0.0.0")
+        for section in sections.values():
+            if section.get("kind") != "interface" or section["settings"].get("type") != "TCPServerInterface": continue
+            old = section["settings"]
+            if str(old.get("listen_port", "")) == str(port) and old.get("listen_ip", "0.0.0.0") == address:
+                raise ValueError(f"TCP server {address}:{port} is already configured by interface {section['name']}")
+    if interface_type == "TCPClientInterface" and not fields.get("target_host"): raise ValueError("Target host is required")
+
+def section_ranges(text):
+    lines, ranges, current, start = text.splitlines(keepends=True), {}, None, None
+    for index, line in enumerate(lines):
+        match = re.match(r"^\s*(\[\[.*?\]\]|\[.*?\])\s*$", line)
+        if not match: continue
+        if current is not None: ranges[current] = (start, index)
+        label = match.group(1); current = label[2:-2].strip() if label.startswith("[[") else label[1:-1].strip(); start = index
+    if current is not None: ranges[current] = (start, len(lines))
+    return lines, ranges
+
+def create_interface_text(text, interface):
+    validate_interface_definition(interface, text)
+    fields = dict(interface.get("fields") or {})
+    fields["enabled"] = bool(interface.get("enabled", True)); fields["mode"] = str(interface.get("mode", "full")).lower()
+    # Only schema-supported keys are written; arbitrary request keys never
+    # become configuration text.
+    allowed = TYPE_FIELDS[interface["type"]]
+    lines = ["\n", f"[[{interface['name']}]]\n", f"type = {interface['type']}\n"]
+    for key in ("enabled", "mode", "listen_ip", "listen_port", "target_host", "target_port", "network_name", "passphrase", "ifac_size"):
+        if key in fields and key in allowed: lines.append(f"{key} = {replacement_value(key, fields[key])}\n")
+    return text.rstrip("\n") + "\n" + "".join(lines)
+
+def delete_interface_text(text, name):
+    validate_change({"kind":"interface_delete", "name":name}, text)
+    lines, ranges = section_ranges(text); start, end = ranges[name]
+    del lines[start:end]
+    return "".join(lines)
 
 def replacement_value(key, value):
     if key in ("enabled", "enable_transport"): return "Yes" if value else "No"
@@ -98,6 +166,8 @@ def replacement_value(key, value):
 
 def edit_text(text, change):
     validate_change(change, text)
+    if change["kind"] == "interface_create": return create_interface_text(text, change["interface"])
+    if change["kind"] == "interface_delete": return delete_interface_text(text, change["name"])
     if change["kind"] == "global": target, changes = "reticulum", {change["setting"]: change["value"]}
     else: target, changes = change["name"], change["changes"]
     lines, section_start, section_end, current = text.splitlines(keepends=True), {}, {}, None
@@ -254,7 +324,7 @@ def apply_change(admin, reason, change, operation_id=None):
         try: return json.loads(existing.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError): raise ValueError("Configuration operation state is unreadable")
     before = read_config(); candidate = edit_text(before, change); diff = redacted_diff(before, candidate)
-    if change.get("kind") == "global":
+    if change.get("kind") != "interface":
         healthy, detail = health(False)
         if not healthy:
             result = {"ok": False, "operation_id": operation_id, "error": f"Refusing configuration restart while Reticulum is unhealthy: {detail}", "preflight_failed": True}
