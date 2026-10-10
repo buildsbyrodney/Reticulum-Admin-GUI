@@ -2,8 +2,8 @@
 # Stable public release metadata. Payloads are always verified before extraction.
 PROJECT_OWNER="buildsbyrodney"
 PROJECT_REPO="Reticulum-Admin-GUI"
-PROJECT_VERSION="0.3.2"
-PROJECT_TAG="v0.3.2"
+PROJECT_VERSION="0.3.3"
+PROJECT_TAG="v0.3.3"
 ARCHIVE_NAME="reticulum-admin-${PROJECT_VERSION}.tar.gz"
 CHECKSUM_NAME="${ARCHIVE_NAME}.sha256"
 PROJECT_RELEASE_URL="https://github.com/buildsbyrodney/Reticulum-Admin-GUI/releases/download/${PROJECT_TAG}/${ARCHIVE_NAME}"
@@ -229,6 +229,15 @@ update_local() {
   fetch_release "$TMP" "$SUM"
   cp -a "$ROOT/.env" "$ROOT/data" "$BACKUP/" 2>/dev/null || true
   tar -xzf "$TMP" -C "$ROOT" --strip-components=1
+  # Keep user settings and secrets intact, but make the installed UI identify
+  # the release that was just unpacked.
+  APP_VERSION=$(tr -d '\r\n' < "$ROOT/VERSION")
+  if grep -q '^RETICULUM_ADMIN_VERSION=' "$ROOT/.env"; then
+    sed "s/^RETICULUM_ADMIN_VERSION=.*/RETICULUM_ADMIN_VERSION=$APP_VERSION/" "$ROOT/.env" > "$ROOT/.env.version-tmp"
+    mv "$ROOT/.env.version-tmp" "$ROOT/.env"
+  else
+    printf '\nRETICULUM_ADMIN_VERSION=%s\n' "$APP_VERSION" >> "$ROOT/.env"
+  fi
   rm -f "$TMP" "$SUM"
   docker_cmd compose up -d --build
   echo "Updated to $PROJECT_TAG. Persistent state backed up in $BACKUP."

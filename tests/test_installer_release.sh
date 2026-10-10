@@ -48,6 +48,10 @@ verify_and_extract "$WORK/update" "$WORK/update-extracted"
 grep -F "fetch_release \"\$TMPDIR_INSTALL/\$ARCHIVE_NAME\" \"\$TMPDIR_INSTALL/\$CHECKSUM_NAME\"" "$ROOT/install.sh" >/dev/null
 grep -F "tar -xzf \"\$TMPDIR_INSTALL/\$ARCHIVE_NAME\"" "$ROOT/install.sh" >/dev/null
 grep -F 'TMP=${TMPDIR:-/tmp}/$ARCHIVE_NAME' "$ROOT/install.sh" >/dev/null
+# An update preserves credentials and other settings, but its footer must
+# identify the newly unpacked release rather than a stale .env value.
+grep -F 'RETICULUM_ADMIN_VERSION=$APP_VERSION' "$ROOT/install.sh" >/dev/null
+grep -F 'sed "s/^RETICULUM_ADMIN_VERSION=.*/RETICULUM_ADMIN_VERSION=$APP_VERSION/"' "$ROOT/install.sh" >/dev/null
 
 # Docker group re-exec must use a fresh group context, verify daemon access,
 # and never fall back to an implicit sudo continuation.
