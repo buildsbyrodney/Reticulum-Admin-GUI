@@ -2,10 +2,12 @@
 # Stable public release metadata. Payloads are always verified before extraction.
 PROJECT_OWNER="buildsbyrodney"
 PROJECT_REPO="Reticulum-Admin-GUI"
-PROJECT_VERSION="0.1.1"
-PROJECT_TAG="v0.1.1"
-PROJECT_RELEASE_URL="https://github.com/buildsbyrodney/Reticulum-Admin-GUI/releases/download/v0.1.1/reticulum-admin-0.1.1.tar.gz"
-PROJECT_CHECKSUM_URL="https://github.com/buildsbyrodney/Reticulum-Admin-GUI/releases/download/v0.1.1/reticulum-admin-0.1.1.tar.gz.sha256"
+PROJECT_VERSION="0.1.2"
+PROJECT_TAG="v0.1.2"
+ARCHIVE_NAME="reticulum-admin-${PROJECT_VERSION}.tar.gz"
+CHECKSUM_NAME="${ARCHIVE_NAME}.sha256"
+PROJECT_RELEASE_URL="https://github.com/buildsbyrodney/Reticulum-Admin-GUI/releases/download/${PROJECT_TAG}/${ARCHIVE_NAME}"
+PROJECT_CHECKSUM_URL="https://github.com/buildsbyrodney/Reticulum-Admin-GUI/releases/download/${PROJECT_TAG}/${CHECKSUM_NAME}"
 
 set -eu
 
@@ -203,8 +205,8 @@ ensure_docker() {
 }
 
 update_local() {
-  TMP=${TMPDIR:-/tmp}/reticulum-admin-$PROJECT_VERSION.tar.gz
-  SUM="$TMP.sha256"
+  TMP=${TMPDIR:-/tmp}/$ARCHIVE_NAME
+  SUM="${TMPDIR:-/tmp}/$CHECKSUM_NAME"
   BACKUP="$ROOT/backup-$(date +%Y%m%d%H%M%S)"
   mkdir -p "$BACKUP"
   fetch_release "$TMP" "$SUM"
@@ -219,7 +221,7 @@ if ! has_project "$ROOT"; then
   if [ "$(id -u)" = 0 ] || [ -w /opt ]; then DEST=/opt/reticulum-admin; else DEST="$HOME/reticulum-admin"; fi
   TMPDIR_INSTALL=$(mktemp -d)
   trap 'rm -rf "$TMPDIR_INSTALL"' EXIT HUP INT TERM
-  fetch_release "$TMPDIR_INSTALL/reticulum-admin.tar.gz" "$TMPDIR_INSTALL/reticulum-admin.tar.gz.sha256"
+  fetch_release "$TMPDIR_INSTALL/$ARCHIVE_NAME" "$TMPDIR_INSTALL/$CHECKSUM_NAME"
   mkdir -p "$DEST"
   if has_project "$DEST"; then
     BACKUP="$DEST/backup-$(date +%Y%m%d%H%M%S)"
@@ -227,7 +229,7 @@ if ! has_project "$ROOT"; then
     cp -a "$DEST/.env" "$DEST/data" "$BACKUP/" 2>/dev/null || true
     echo "Existing configuration and persistent data backed up in $BACKUP"
   fi
-  tar -xzf "$TMPDIR_INSTALL/reticulum-admin.tar.gz" -C "$DEST" --strip-components=1
+  tar -xzf "$TMPDIR_INSTALL/$ARCHIVE_NAME" -C "$DEST" --strip-components=1
   echo "Reticulum Admin installed in $DEST"
   cd "$DEST"
   exec /bin/sh "$DEST/install.sh" "${1:-}"

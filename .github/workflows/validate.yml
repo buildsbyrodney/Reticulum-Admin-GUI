@@ -12,7 +12,8 @@ jobs:
           python-version: '3.12'
       - run: python -m unittest tests/test_management.py
       - run: python -c "from pathlib import Path; [compile(p.read_text(), str(p), 'exec') for p in Path('.').glob('**/*.py') if '.git' not in p.parts]"
-      - run: bash -n install.sh scripts/*.sh rnsd/start-rnsd.sh
+      - run: bash -n install.sh scripts/*.sh rnsd/start-rnsd.sh tests/test_installer_release.sh
+      - run: ./tests/test_installer_release.sh
       - name: Build and inspect release archive
         run: |
           chmod +x scripts/build-release.sh

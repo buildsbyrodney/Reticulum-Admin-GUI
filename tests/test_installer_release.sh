@@ -1,0 +1,52 @@
+#!/bin/sh
+# Verify that installer download names match the filename recorded by sha256sum.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+VERSION=$(tr -d '\r\n' < "$ROOT/VERSION")
+ARCHIVE_NAME="reticulum-admin-${VERSION}.tar.gz"
+CHECKSUM_NAME="${ARCHIVE_NAME}.sha256"
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+
+make_release() {
+  target=$1
+  mkdir -p "$target/payload/reticulum-admin-$VERSION"
+  printf '%s\n' "$VERSION" > "$target/payload/reticulum-admin-$VERSION/VERSION"
+  tar -C "$target/payload" -czf "$target/$ARCHIVE_NAME" "reticulum-admin-$VERSION"
+  (cd "$target" && sha256sum "$ARCHIVE_NAME" > "$CHECKSUM_NAME")
+}
+
+verify_and_extract() {
+  target=$1
+  install_dir=$2
+  (cd "$target" && sha256sum -c "$CHECKSUM_NAME")
+  mkdir -p "$install_dir"
+  tar -xzf "$target/$ARCHIVE_NAME" -C "$install_dir" --strip-components=1
+  test "$(tr -d '\r\n' < "$install_dir/VERSION")" = "$VERSION"
+}
+
+# Standalone flow: the release's published archive name is retained locally.
+make_release "$WORK/published"
+mkdir -p "$WORK/standalone"
+cp "$WORK/published/$ARCHIVE_NAME" "$WORK/published/$CHECKSUM_NAME" "$WORK/standalone/"
+verify_and_extract "$WORK/standalone" "$WORK/standalone-extracted"
+
+# A local rename must fail, exactly as the Raspberry Pi report demonstrated.
+mv "$WORK/standalone/$ARCHIVE_NAME" "$WORK/standalone/renamed.tar.gz"
+if (cd "$WORK/standalone" && sha256sum -c "$CHECKSUM_NAME") >/dev/null 2>&1; then
+  echo "Checksum verification unexpectedly accepted a renamed archive." >&2
+  exit 1
+fi
+
+# Update flow also retains the release filename and extracts successfully.
+mkdir -p "$WORK/update"
+cp "$WORK/published/$ARCHIVE_NAME" "$WORK/published/$CHECKSUM_NAME" "$WORK/update/"
+verify_and_extract "$WORK/update" "$WORK/update-extracted"
+
+# Keep the test coupled to the installer call sites, not just an equivalent flow.
+grep -F "fetch_release \"\$TMPDIR_INSTALL/\$ARCHIVE_NAME\" \"\$TMPDIR_INSTALL/\$CHECKSUM_NAME\"" "$ROOT/install.sh" >/dev/null
+grep -F "tar -xzf \"\$TMPDIR_INSTALL/\$ARCHIVE_NAME\"" "$ROOT/install.sh" >/dev/null
+grep -F 'TMP=${TMPDIR:-/tmp}/$ARCHIVE_NAME' "$ROOT/install.sh" >/dev/null
+
+echo "Standalone and update release filename verification passed."
