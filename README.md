@@ -22,7 +22,9 @@ chmod +x install.sh
 
 The installer is a normal file you can inspect before execution. It downloads a tagged stable release archive, verifies SHA-256 before extracting, and does not normally install arbitrary application files from `main`.
 
-The installer checks Docker and Compose, asks for a port (default `8740`), access mode (`local` is the default), and timezone (default `America/Chicago`). It checks an occupied port when `ss` is available, creates a restricted `.env`, generates a random `ADMIN_SECRET_KEY`, then builds and starts the services. It preserves an existing `.env` unless you explicitly choose to replace it.
+The installer checks Docker and Compose, asks for a port (default `8740`), access mode (`local` is the default), and timezone (default `America/Chicago`). On Debian, Ubuntu, Raspberry Pi OS, and other Debian-derived systems, it offers to install missing Docker Engine and Compose v2 from Docker's official APT repository. The default interactive answer is Yes; non-interactive use requires `INSTALL_DOCKER=yes`. It checks an occupied port when `ss` is available, creates a restricted `.env`, generates a random `ADMIN_SECRET_KEY`, then builds and starts the services. It preserves an existing `.env` unless you explicitly choose to replace it.
+
+If Docker is installed but the current account cannot reach its daemon, the installer offers to add that account to the `docker` group. New group membership only takes effect after logging out and back in (or rebooting). You can exit at that point or explicitly continue the current installation with `sudo`; the installer never assumes the new group membership is already active.
 
 ## Single-file installer workflow
 
@@ -41,8 +43,8 @@ Rerunning from an installation offers Update, Reconfigure, Repair, or Cancel. Re
 ## Raspberry Pi 3 / Debian Lite live-test checklist
 
 1. Install Debian Lite 64-bit and confirm `uname -m` returns `aarch64`.
-2. Install Docker Engine plus Docker Compose v2; confirm `docker compose version`.
-3. Download the standalone `install.sh`, inspect it, then `chmod +x install.sh && ./install.sh`.
+2. Download the standalone `install.sh`, inspect it, then `chmod +x install.sh && ./install.sh`. Accept the Docker installation prompt if Docker is not already installed.
+3. Confirm `docker compose version`.
 4. Run `docker compose ps`; create the first administrator and check Dashboard, Interfaces, Paths, Queues, Logs, and Timeline.
 5. Restart containers, then reboot the Pi; confirm state remains in `data/` and services return.
 6. Run `./scripts/diagnose.sh` and save its output if troubleshooting is needed.
@@ -50,7 +52,7 @@ Rerunning from an installation offers Update, Reconfigure, Repair, or Cancel. Re
 
 The default observer interval is 30 seconds and the web server uses one worker for Pi-friendly idle use. Do not claim memory figures until this checklist has been completed on hardware.
 
-For automation, `./install.sh --non-interactive` accepts `ADMIN_PORT`, `ADMIN_ACCESS_MODE`, and `SERVER_TIMEZONE` from the environment (or their defaults). It never replaces an existing `.env` in that mode.
+For automation, `./install.sh --non-interactive` accepts `ADMIN_PORT`, `ADMIN_ACCESS_MODE`, and `SERVER_TIMEZONE` from the environment (or their defaults). If Docker is missing, it requires the additional explicit opt-in `INSTALL_DOCKER=yes`; it never replaces an existing `.env` in that mode.
 
 Local mode binds to `127.0.0.1`; network mode binds to `0.0.0.0`. Network mode does not configure a firewall, HTTPS, NAT, or reverse proxy.
 

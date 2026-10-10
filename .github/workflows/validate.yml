@@ -13,4 +13,13 @@ jobs:
       - run: python -m unittest tests/test_management.py
       - run: python -c "from pathlib import Path; [compile(p.read_text(), str(p), 'exec') for p in Path('.').glob('**/*.py') if '.git' not in p.parts]"
       - run: bash -n install.sh scripts/*.sh rnsd/start-rnsd.sh
-      - run: chmod +x scripts/build-release.sh && ./scripts/build-release.sh && (cd release && sha256sum -c *.sha256)
+      - name: Build and inspect release archive
+        run: |
+          chmod +x scripts/build-release.sh
+          ./scripts/build-release.sh
+          (cd release && sha256sum -c *.sha256)
+          if find . -path './.git' -prune -o -path './release' -prune -o -type f -name '*.sh' -exec grep -Il "$(printf '\\r')" {} + | grep -q .; then
+            echo 'CRLF line ending found in a shell script.' >&2
+            exit 1
+          fi
+          tar -tvzf release/*.tar.gz | awk '$NF ~ /\/install\.sh$/ { found=1; if (substr($1, 4, 1) != "x") exit 1 } END { exit found ? 0 : 1 }'
