@@ -11,6 +11,16 @@ CONFIG = Path(os.environ.get("RETICULUM_DIR", "/reticulum")) / "config"
 ROOT = CONFIG.parent
 SNAPSHOTS = ROOT / "admin-config-snapshots"
 RESTART_REQUEST = ROOT / "admin-control" / "restart-request"
+STATUS_DIR = ROOT / "admin-status"
+GENERATION_FILE = STATUS_DIR / "rnsd.generation"
+OPERATIONS = ROOT / "admin-config-operations"
+# These values deliberately fit inside the explicit Gunicorn and HTTP budgets.
+# A Pi 3 can take a while to relaunch rnsd, but a single rnstatus probe should
+# never consume most of that wait.
+RESTART_HEALTH_TIMEOUT = float(os.environ.get("RESTART_HEALTH_TIMEOUT", "35"))
+INTERFACE_HEALTH_TIMEOUT = float(os.environ.get("INTERFACE_HEALTH_TIMEOUT", "10"))
+RNSTATUS_PROBE_TIMEOUT = float(os.environ.get("RNSTATUS_PROBE_TIMEOUT", "3"))
+POLL_INTERVAL = float(os.environ.get("RESTART_POLL_INTERVAL", "0.75"))
 MODES = {"full", "point_to_point", "access_point", "roaming", "boundary", "gateway", "internal"}
 LOG_LEVELS = {str(n) for n in range(0, 8)}
 SECRET_KEYS = {"passphrase", "ifac_passphrase", "network_key"}
@@ -130,7 +140,11 @@ def create_snapshot(admin, reason, change, automatic=True, parent=None):
     text = read_config(); SNAPSHOTS.mkdir(parents=True, exist_ok=True); sid = f"{int(time.time()*1000)}"
     directory = SNAPSHOTS / sid; directory.mkdir(mode=0o700)
     (directory / "config").write_text(text, encoding="utf-8"); os.chmod(directory / "config", 0o600)
-    meta = {"id": sid, "timestamp": utc_now(), "admin": admin, "reason": reason[:240], "change": change, "automatic": automatic, "hash": config_hash(text), "parent": parent}
+    safe_change = json.loads(json.dumps(change))
+    for key in ("passphrase", "ifac_passphrase", "network_key"):
+        if isinstance(safe_change.get("changes"), dict) and key in safe_change["changes"]:
+            safe_change["changes"][key] = "Changed"
+    meta = {"id": sid, "timestamp": utc_now(), "admin": admin, "reason": reason[:240], "change": safe_change, "automatic": automatic, "hash": config_hash(text), "parent": parent}
     (directory / "metadata.json").write_text(json.dumps(meta), encoding="utf-8"); os.chmod(directory / "metadata.json", 0o600)
     return meta
 
@@ -147,42 +161,100 @@ def snapshot_text(snapshot_id):
     try: return (SNAPSHOTS / str(snapshot_id) / "config").read_text(encoding="utf-8")
     except OSError: raise ValueError("Snapshot not found")
 
-def health(wait_for_restart=False):
-    last = ""
-    for _ in range(12 if wait_for_restart else 1):
-        if wait_for_restart and RESTART_REQUEST.exists():
-            time.sleep(2)
-            continue
-        try:
-            result = subprocess.run(["rnstatus", "--config", str(ROOT), "--json"], capture_output=True, text=True, timeout=12)
-            if result.returncode == 0:
-                if wait_for_restart: time.sleep(2)
-                return True, (result.stderr or result.stdout)[-1000:]
-            last = (result.stderr or result.stdout)[-1000:]
-        except (OSError, subprocess.TimeoutExpired) as error: last = str(error)
-        if wait_for_restart: time.sleep(2)
-    return False, last
+def rnsd_generation():
+    try: return int(GENERATION_FILE.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError): return 0
 
-def apply_runtime(change):
+def probe_health():
+    """Run one bounded, inexpensive health probe."""
+    try:
+        result = subprocess.run(["rnstatus", "--config", str(ROOT), "--json"], capture_output=True, text=True, timeout=RNSTATUS_PROBE_TIMEOUT)
+        return result.returncode == 0, (result.stderr or result.stdout)[-1000:]
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return False, str(error)
+
+def health(wait_for_restart=False, generation_before=None, operation_id=None):
+    """Bounded health check; restart health never trusts an old heartbeat."""
+    if not wait_for_restart:
+        return probe_health()
+    before = rnsd_generation() if generation_before is None else generation_before
+    deadline = time.monotonic() + RESTART_HEALTH_TIMEOUT
+    last = "Waiting for rnsd generation to advance"
+    while time.monotonic() < deadline:
+        generation = rnsd_generation()
+        if generation > before:
+            ok, detail = probe_health()
+            if ok:
+                return True, detail, {"restart_verified": True, "generation": generation, "operation_id": operation_id}
+            last = detail or "rnstatus has not responded after restart"
+        else:
+            last = f"Waiting for rnsd generation after {before} (currently {generation})"
+        time.sleep(POLL_INTERVAL)
+    return False, last, {"restart_verified": False, "generation": rnsd_generation(), "operation_id": operation_id}
+
+def write_restart_request(operation_id=None):
+    RESTART_REQUEST.parent.mkdir(parents=True, exist_ok=True)
+    before = rnsd_generation()
+    payload = {"operation_id": operation_id or "", "requested_at": utc_now(), "generation_before": before}
+    fd, path = tempfile.mkstemp(prefix="restart-request.", dir=str(RESTART_REQUEST.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle); handle.flush(); os.fsync(handle.fileno())
+        os.replace(path, RESTART_REQUEST)
+    finally:
+        if os.path.exists(path): os.unlink(path)
+    return before
+
+def apply_runtime(change, operation_id=None):
     if change["kind"] == "interface":
-        result = subprocess.run(["rnstatus", "--config", str(ROOT), "--reload", change["name"]], capture_output=True, text=True, timeout=20)
+        result = subprocess.run(["rnstatus", "--config", str(ROOT), "--reload", change["name"]], capture_output=True, text=True, timeout=INTERFACE_HEALTH_TIMEOUT)
         return result.returncode == 0, "interface_reload", (result.stderr or result.stdout)[-1000:]
-    RESTART_REQUEST.parent.mkdir(parents=True, exist_ok=True); RESTART_REQUEST.write_text("restart\n", encoding="utf-8")
-    return True, "rnsd_restart", "restart requested"
+    before = write_restart_request(operation_id)
+    return True, "rnsd_restart", "restart requested", before
 
-def apply_change(admin, reason, change):
+def operation_file(operation_id):
+    if not re.fullmatch(r"CFG-\d{8}-\d{6}-[A-F0-9]{6}", str(operation_id or "")):
+        raise ValueError("Invalid configuration operation ID")
+    return OPERATIONS / f"{operation_id}.json"
+
+def save_operation(operation_id, result):
+    path = operation_file(operation_id); OPERATIONS.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(prefix="operation.", dir=str(OPERATIONS))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(result, handle); handle.flush(); os.fsync(handle.fileno())
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp): os.unlink(temp)
+
+def apply_change(admin, reason, change, operation_id=None):
+    operation_id = operation_id or f"CFG-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{os.urandom(3).hex().upper()}"
+    existing = operation_file(operation_id)
+    if existing.exists():
+        try: return json.loads(existing.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError): raise ValueError("Configuration operation state is unreadable")
     before = read_config(); candidate = edit_text(before, change); diff = redacted_diff(before, candidate)
     snapshot = create_snapshot(admin, reason, change, automatic=True)
-    atomic_write(candidate); applied, method, detail = apply_runtime(change)
-    ok, health_detail = health(method == "rnsd_restart") if applied else (False, detail)
-    if ok: return {"ok": True, "snapshot": snapshot, "diff": diff, "apply_method": method, "health": health_detail}
-    atomic_write(before); rollback_applied, rollback_method, rollback_detail = apply_runtime(change); recovered, recovered_detail = health(rollback_method == "rnsd_restart") if rollback_applied else (False, rollback_detail)
-    return {"ok": False, "snapshot": snapshot, "diff": diff, "apply_method": method, "error": health_detail, "rolled_back": recovered, "rollback_error": None if recovered else recovered_detail}
+    atomic_write(candidate); runtime = apply_runtime(change, operation_id); applied, method, detail = runtime[:3]; generation_before = runtime[3] if len(runtime) > 3 else None
+    if applied:
+        checked = health(method == "rnsd_restart", generation_before, operation_id)
+        ok, health_detail = checked[:2]; verification = checked[2] if len(checked) > 2 else {}
+    else: ok, health_detail, verification = False, detail, {}
+    if ok:
+        result = {"ok": True, "snapshot": snapshot, "diff": diff, "apply_method": method, "health": health_detail, "operation_id": operation_id, **verification}
+        save_operation(operation_id, result); return result
+    atomic_write(before); rollback = apply_runtime(change, None); rollback_applied, rollback_method, rollback_detail = rollback[:3]; rollback_before = rollback[3] if len(rollback) > 3 else None
+    if rollback_applied:
+        recovery = health(rollback_method == "rnsd_restart", rollback_before, operation_id)
+        recovered, recovered_detail = recovery[:2]
+    else: recovered, recovered_detail = False, rollback_detail
+    result = {"ok": False, "snapshot": snapshot, "diff": diff, "apply_method": method, "operation_id": operation_id, "error": health_detail, "rolled_back": recovered, "rollback_error": None if recovered else recovered_detail}
+    save_operation(operation_id, result); return result
 
 def restore_snapshot(admin, reason, snapshot_id):
     before, target = read_config(), snapshot_text(snapshot_id); diff = redacted_diff(before, target); safety = create_snapshot(admin, reason, {"restore": snapshot_id}, automatic=True, parent=snapshot_id)
-    atomic_write(target); RESTART_REQUEST.parent.mkdir(parents=True, exist_ok=True); RESTART_REQUEST.write_text("restart\n", encoding="utf-8")
-    ok, detail = health(True)
+    atomic_write(target); before_generation = write_restart_request()
+    checked = health(True, before_generation); ok, detail = checked[:2]
     if ok: return {"ok": True, "snapshot": safety, "diff": diff, "apply_method": "rnsd_restart"}
-    atomic_write(before); RESTART_REQUEST.write_text("restart\n", encoding="utf-8"); recovered, recovery = health(True)
+    atomic_write(before); rollback_generation = write_restart_request(); recovery_result = health(True, rollback_generation); recovered, recovery = recovery_result[:2]
     return {"ok": False, "snapshot": safety, "diff": diff, "rolled_back": recovered, "error": detail, "rollback_error": None if recovered else recovery}

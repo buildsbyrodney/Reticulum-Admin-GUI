@@ -9,4 +9,6 @@ COPY static ./static
 
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8000
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "1", "--access-logfile", "-", "app:app"]
+# One worker is deliberate for a resource-constrained Raspberry Pi 3.  Its 110s
+# request budget is outside the 90s agent worker and 100s internal HTTP bounds.
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "1", "--timeout", "110", "--graceful-timeout", "10", "--access-logfile", "-", "app:app"]

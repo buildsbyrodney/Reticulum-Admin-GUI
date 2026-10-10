@@ -6,6 +6,7 @@ import sqlite3
 import threading
 import urllib.error
 import urllib.request
+import socket
 import platform
 import time
 from datetime import datetime, timezone
@@ -49,6 +50,9 @@ def db():
       CREATE INDEX IF NOT EXISTS events_filter_idx ON events(occurred_at, kind, interface_name, remote_ip);
       CREATE INDEX IF NOT EXISTS connections_active_idx ON connections(connection_key, status);
     """)
+    # Keep existing persistent installations compatible with the operation-ID audit trail.
+    try: con.execute("ALTER TABLE config_changes ADD COLUMN operation_id TEXT")
+    except sqlite3.OperationalError: pass
     return con
 
 def format_time(value):
@@ -177,16 +181,26 @@ def management(path, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base+path, data=data, headers={"X-Management-Token":token, "Content-Type":"application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=25) as response: return json.loads(response.read())
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as error: return {"ok":False,"error":str(error)}
+        timeout = float(os.environ.get("MANAGEMENT_HTTP_TIMEOUT", "100"))
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            payload = json.loads(response.read())
+            if not isinstance(payload, dict): raise ValueError("Management response is not an object")
+            return payload
+    except (TimeoutError, socket.timeout) as error:
+        return {"ok":False, "unknown":True, "error":"The management operation did not return a result in time. Reticulum may still have applied the change. Check current status before retrying.", "technical_error":str(error)}
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, ValueError, OSError) as error:
+        return {"ok":False, "unknown":True, "error":"The management operation did not return a usable result. Reticulum may still have applied the change. Check current status before retrying.", "technical_error":str(error)}
 
 def record_config_change(result, change):
     diff = result.get("diff") or []; setting = change.get("setting") or change.get("name") or "snapshot restore"
     old = ", ".join(f"{x.get('section')}.{x.get('key')}={x.get('old')}" for x in diff)[:1000]
     new = ", ".join(f"{x.get('section')}.{x.get('key')}={x.get('new')}" for x in diff)[:1000]
     snapshot_id = (result.get("snapshot") or {}).get("id")
-    with db() as con: con.execute("INSERT INTO config_changes(occurred_at,admin,setting,old_value,new_value,snapshot_id,apply_method,result,rolled_back,error) VALUES(?,?,?,?,?,?,?,?,?,?)", (now(), session.get("admin", "admin"), setting, old, new, snapshot_id, result.get("apply_method"), "Applied" if result.get("ok") else "Rolled Back" if result.get("rolled_back") else "Failed", int(bool(result.get("rolled_back"))), result.get("error") or result.get("rollback_error")))
-    audit("config_changed" if result.get("ok") else "config_rollback", f"Configuration {setting}: {'applied' if result.get('ok') else 'rolled back' if result.get('rolled_back') else 'failed'}", "info" if result.get("ok") else "error", detail={"snapshot_id": snapshot_id, "apply_method": result.get("apply_method")})
+    status = "Applied" if result.get("ok") else "Result Unknown / Verification Timed Out" if result.get("unknown") else "Rolled Back" if result.get("rolled_back") else "Failed"
+    with db() as con: con.execute("INSERT INTO config_changes(occurred_at,admin,setting,old_value,new_value,snapshot_id,apply_method,result,rolled_back,error,operation_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (now(), session.get("admin", "admin"), setting, old, new, snapshot_id, result.get("apply_method"), status, int(bool(result.get("rolled_back"))), result.get("error") or result.get("rollback_error"), result.get("operation_id")))
+    kind = "config_changed" if result.get("ok") else "config_unknown" if result.get("unknown") else "config_rollback"
+    message = f"Configuration {setting}: {'applied' if result.get('ok') else 'result unknown' if result.get('unknown') else 'rolled back' if result.get('rolled_back') else 'failed'}"
+    audit(kind, message, "info" if result.get("ok") else "warning" if result.get("unknown") else "error", detail={"snapshot_id": snapshot_id, "apply_method": result.get("apply_method"), "operation_id": result.get("operation_id")})
 
 def recovery_preview(form):
     target = {"identity":form.get("identity", "").strip(), "transport":form.get("transport", "").strip(), "destination":form.get("destination", "").strip(), "interface":form.get("interface", "").strip()}
@@ -199,7 +213,7 @@ def system_info():
         values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line)
         memory = values.get("MemTotal", "Unavailable").strip()
     except OSError: pass
-    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.2.0"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
+    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.2.1"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
@@ -373,7 +387,8 @@ def configuration_preview():
         change={"kind":"interface","name":request.form.get("name"),"changes":changes}
     result=management("/config/preview", {"change":change})
     if not result.get("ok"): flash(result.get("error", "Configuration validation failed"), "error"); return redirect(url_for("configuration"))
-    session["config_change"]={"change":change,"reason":request.form.get("reason", "Configuration change")[:240]}
+    operation_id = f"CFG-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(3).upper()}"
+    session["config_change"]={"change":change,"reason":request.form.get("reason", "Configuration change")[:240], "operation_id":operation_id}
     return render_template("configuration_preview.html", title="Review Configuration Change", preview=result, change=change)
 
 @app.post("/configuration/apply")
@@ -381,9 +396,10 @@ def configuration_preview():
 def configuration_apply():
     require_csrf(); item=session.pop("config_change", None)
     if not item: abort(400, "No configuration change to apply")
-    result=management("/config/apply", {"admin":session["admin"],"reason":item["reason"],"change":item["change"]})
+    result=management("/config/apply", {"admin":session["admin"],"reason":item["reason"],"change":item["change"],"operation_id":item["operation_id"]})
+    result.setdefault("operation_id", item["operation_id"])
     record_config_change(result, item["change"])
-    flash("Configuration applied." if result.get("ok") else "Configuration failed and was rolled back." if result.get("rolled_back") else "Configuration failed; recovery needs attention.", "success" if result.get("ok") else "error")
+    flash("Configuration applied and restart verified." if result.get("ok") and result.get("restart_verified") else "Configuration applied." if result.get("ok") else "The management operation did not return a result in time. Reticulum may still have applied the change; check current status before retrying." if result.get("unknown") else "Configuration failed and was rolled back." if result.get("rolled_back") else "Configuration failed; recovery needs attention.", "success" if result.get("ok") else "error")
     return redirect(url_for("configuration"))
 
 @app.route("/snapshots", methods=["GET", "POST"])

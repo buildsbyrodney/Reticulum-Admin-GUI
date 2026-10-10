@@ -77,6 +77,22 @@ class LiveRnstatusTests(unittest.TestCase):
         self.assertIn("Up", page)
         self.assertIn("AutoInterface[Default Interface]", page)
 
+    def test_configuration_agent_timeout_is_recorded_not_http_500(self):
+        client = self.client()
+        original = self.app_module.management
+        self.app_module.management = lambda path, body=None: {"ok": False, "unknown": True, "error": "The management operation did not return a result in time."}
+        try:
+            with client.session_transaction() as session:
+                session["config_change"] = {"operation_id": "CFG-20261010-051834-A1B2C3", "reason": "test", "change": {"kind": "global", "setting": "enable_transport", "value": True}}
+            response = client.post("/configuration/apply", data={"csrf_token": "test-csrf"}, follow_redirects=False)
+        finally:
+            self.app_module.management = original
+        self.assertEqual(response.status_code, 302)
+        with self.app_module.db() as con:
+            row = con.execute("SELECT result, operation_id FROM config_changes ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertEqual(row["result"], "Result Unknown / Verification Timed Out")
+        self.assertEqual(row["operation_id"], "CFG-20261010-051834-A1B2C3")
+
 
 if __name__ == "__main__":
     unittest.main()

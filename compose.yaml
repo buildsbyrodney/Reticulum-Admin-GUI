@@ -7,7 +7,7 @@ services:
     restart: unless-stopped
     environment:
       SERVER_TIMEZONE: ${SERVER_TIMEZONE:-America/Chicago}
-      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.2.0}
+      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.2.1}
       HOST_ARCH: ${HOST_ARCH:-unknown}
       HOST_OS: ${HOST_OS:-unknown}
       INSTALL_DOCKER_VERSION: ${INSTALL_DOCKER_VERSION:-unknown}
@@ -32,8 +32,13 @@ services:
     restart: unless-stopped
     environment:
       MANAGEMENT_TOKEN: ${MANAGEMENT_TOKEN:?Set MANAGEMENT_TOKEN in .env}
-      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.2.0}
+      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.2.1}
       RETICULUM_DIR: /reticulum
+      # Short probes and this bounded restart budget fit inside the explicit
+      # 90-second agent worker and 100-second web request budgets.
+      RESTART_HEALTH_TIMEOUT: ${RESTART_HEALTH_TIMEOUT:-35}
+      RNSTATUS_PROBE_TIMEOUT: ${RNSTATUS_PROBE_TIMEOUT:-3}
+      INTERFACE_HEALTH_TIMEOUT: ${INTERFACE_HEALTH_TIMEOUT:-10}
     volumes:
       # The management agent is the sole config writer. The web UI remains read-only.
       - ./data/reticulum:/reticulum
@@ -52,11 +57,12 @@ services:
       SERVER_TIMEZONE: ${SERVER_TIMEZONE:-America/Chicago}
       MANAGEMENT_URL: http://management-agent:8081
       MANAGEMENT_TOKEN: ${MANAGEMENT_TOKEN:?Set MANAGEMENT_TOKEN in .env}
-      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.2.0}
+      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.2.1}
       HOST_ARCH: ${HOST_ARCH:-unknown}
       HOST_OS: ${HOST_OS:-unknown}
       INSTALL_DOCKER_VERSION: ${INSTALL_DOCKER_VERSION:-unknown}
       INSTALL_COMPOSE_VERSION: ${INSTALL_COMPOSE_VERSION:-unknown}
+      MANAGEMENT_HTTP_TIMEOUT: ${MANAGEMENT_HTTP_TIMEOUT:-100}
     ports:
       - "${ADMIN_BIND_ADDRESS:-127.0.0.1}:${ADMIN_PORT:-8740}:8000"
     volumes:

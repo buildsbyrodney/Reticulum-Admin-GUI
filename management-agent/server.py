@@ -36,7 +36,7 @@ def config_preview():
 @app.post("/config/apply")
 def config_apply():
     auth(); body=request.get_json(silent=True) or {}
-    try: return jsonify(configuration.apply_change(str(body.get("admin") or "admin")[:80], str(body.get("reason") or "Configuration change")[:240], body.get("change") or {}))
+    try: return jsonify(configuration.apply_change(str(body.get("admin") or "admin")[:80], str(body.get("reason") or "Configuration change")[:240], body.get("change") or {}, body.get("operation_id")))
     except ValueError as error: return jsonify({"ok":False,"error":str(error)}),400
 
 @app.get("/snapshots")
