@@ -7,22 +7,25 @@ services:
     restart: unless-stopped
     environment:
       SERVER_TIMEZONE: ${SERVER_TIMEZONE:-America/Chicago}
-      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.2.2}
+      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.2.3}
       HOST_ARCH: ${HOST_ARCH:-unknown}
       HOST_OS: ${HOST_OS:-unknown}
       INSTALL_DOCKER_VERSION: ${INSTALL_DOCKER_VERSION:-unknown}
       INSTALL_COMPOSE_VERSION: ${INSTALL_COMPOSE_VERSION:-unknown}
       EVENT_RETENTION_DAYS: ${EVENT_RETENTION_DAYS:-90}
       OBSERVER_INTERVAL: ${OBSERVER_INTERVAL:-30}
+      RNSD_SNAPSHOT_MAX_AGE: ${RNSD_SNAPSHOT_MAX_AGE:-45}
     volumes:
       # Reticulum keeps its config, identities, storage, and service logs here.
       - ./data/reticulum:/root/.reticulum
     healthcheck:
-      test: ["CMD-SHELL", "test -f /root/.reticulum/admin-status/rnsd.heartbeat && test $$(($$(date +%s) - $$(cat /root/.reticulum/admin-status/rnsd.heartbeat))) -lt 60"]
-      interval: 30s
+      # Reads the observer snapshot only; it verifies the local shared instance,
+      # not merely that the launcher loop is alive.
+      test: ["CMD", "python", "/usr/local/bin/check-rnsd-health"]
+      interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      start_period: 90s
 
   management-agent:
     build:
@@ -30,7 +33,7 @@ services:
     restart: unless-stopped
     environment:
       MANAGEMENT_TOKEN: ${MANAGEMENT_TOKEN:?Set MANAGEMENT_TOKEN in .env}
-      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.2.2}
+      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.2.3}
       RETICULUM_DIR: /reticulum
       # Observer-based health and this bounded restart budget fit inside the explicit
       # 90-second agent worker and 100-second web request budgets.
@@ -55,7 +58,7 @@ services:
       SERVER_TIMEZONE: ${SERVER_TIMEZONE:-America/Chicago}
       MANAGEMENT_URL: http://management-agent:8081
       MANAGEMENT_TOKEN: ${MANAGEMENT_TOKEN:?Set MANAGEMENT_TOKEN in .env}
-      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.2.2}
+      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.2.3}
       HOST_ARCH: ${HOST_ARCH:-unknown}
       HOST_OS: ${HOST_OS:-unknown}
       INSTALL_DOCKER_VERSION: ${INSTALL_DOCKER_VERSION:-unknown}

@@ -66,6 +66,14 @@ docker compose restart rnsd             # explicit daemon restart
 docker compose down                     # preserves data/
 ```
 
+Do not run `docker compose run --rm rnsd` with its normal entrypoint for diagnostics: that attempts to launch another managed Reticulum instance against the same persistent state. v0.2.3 safely rejects the duplicate with a lifetime `flock` lock, but the correct inspection command is:
+
+```sh
+docker compose run --rm --entrypoint sh rnsd
+```
+
+The rnsd Docker health check reads the observer snapshot every 15 seconds (5-second timeout, 3 retries, 90-second Pi-friendly startup period). It is healthy only when a fresh snapshot matches the active rnsd generation and confirms the live shared Reticulum instance is ready. A launcher heartbeat alone is not sufficient.
+
 Open the printed URL and create the required first administrator account.
 
 ## Observability

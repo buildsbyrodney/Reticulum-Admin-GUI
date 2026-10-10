@@ -94,6 +94,7 @@ def main():
             "rns_version": version(),
             "status": status,
             "status_error": error,
+            "reticulum_ready": error is None and isinstance(status, (dict, list)) and bool(status),
             "paths": paths,
             "path_error": path_error,
             "source": "rnstatus --json --all --totals --queues --announce-stats --pr-stats",

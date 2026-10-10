@@ -177,12 +177,13 @@ def probe_health(expected_generation=None):
     if not snapshot: return False, "observer snapshot unavailable"
     observed = snapshot.get("rnsd_generation")
     if expected_generation is not None and not isinstance(observed, int): return False, "observer snapshot has no rnsd generation"
-    if expected_generation is not None and observed < expected_generation: return False, f"observer snapshot generation {observed} is older than expected {expected_generation}"
+    if expected_generation is not None and observed != expected_generation: return False, f"observer snapshot generation {observed} does not match expected {expected_generation}"
     if expected_generation is not None:
         try:
             collected = datetime.fromisoformat(str(snapshot.get("collected_at", "")).replace("Z", "+00:00")).timestamp()
             if collected <= GENERATION_FILE.stat().st_mtime: return False, "observer snapshot predates rnsd generation transition"
         except (OSError, TypeError, ValueError): return False, "observer snapshot has no valid collection timestamp"
+    if snapshot.get("reticulum_ready") is not True: return False, "observer reports Reticulum shared instance unavailable"
     if snapshot.get("status_error"): return False, f"observer status error: {snapshot['status_error']}"
     status = snapshot.get("status")
     if not isinstance(status, (dict, list)) or not status: return False, "observer snapshot has no valid Reticulum status"
@@ -191,7 +192,7 @@ def probe_health(expected_generation=None):
 def health(wait_for_restart=False, generation_before=None, operation_id=None):
     """Bounded health check; restart health never trusts an old heartbeat."""
     if not wait_for_restart:
-        return probe_health()
+        return probe_health(rnsd_generation())
     before = rnsd_generation() if generation_before is None else generation_before
     deadline = time.monotonic() + RESTART_HEALTH_TIMEOUT
     last = "Waiting for rnsd generation to advance"
@@ -253,6 +254,11 @@ def apply_change(admin, reason, change, operation_id=None):
         try: return json.loads(existing.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError): raise ValueError("Configuration operation state is unreadable")
     before = read_config(); candidate = edit_text(before, change); diff = redacted_diff(before, candidate)
+    if change.get("kind") == "global":
+        healthy, detail = health(False)
+        if not healthy:
+            result = {"ok": False, "operation_id": operation_id, "error": f"Refusing configuration restart while Reticulum is unhealthy: {detail}", "preflight_failed": True}
+            save_operation(operation_id, result); return result
     snapshot = create_snapshot(admin, reason, change, automatic=True)
     atomic_write(candidate); runtime = apply_runtime(change, operation_id); applied, method, detail = runtime[:3]; generation_before = runtime[3] if len(runtime) > 3 else None
     if applied:
@@ -269,7 +275,7 @@ def apply_change(admin, reason, change, operation_id=None):
         recovery = health(rollback_method == "rnsd_restart", rollback_before, operation_id)
         recovered, recovered_detail = recovery[:2]
     else: recovered, recovered_detail = False, rollback_detail
-    result = {"ok": False, "snapshot": snapshot, "diff": diff, "apply_method": method, "operation_id": operation_id, "error": health_detail, "rolled_back": recovered, "rollback_error": None if recovered else recovered_detail}
+    result = {"ok": False, "snapshot": snapshot, "diff": diff, "apply_method": method, "operation_id": operation_id, "error": health_detail, "rolled_back": recovered, "recovery_failed": not recovered, "rollback_error": None if recovered else recovered_detail}
     save_operation(operation_id, result); return result
 
 def restore_snapshot(admin, reason, snapshot_id):

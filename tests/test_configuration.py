@@ -62,9 +62,9 @@ class ConfigurationTests(unittest.TestCase):
             clock[0] += 1
             # Old generation snapshot remains briefly after the new daemon starts.
             if clock[0] == 1:
-                cfg.SNAPSHOT_FILE.write_text('{"collected_at":"2100-01-01T00:00:00+00:00","rnsd_generation":5,"status":{"name":"old"},"status_error":null}')
+                cfg.SNAPSHOT_FILE.write_text('{"collected_at":"2100-01-01T00:00:00+00:00","rnsd_generation":5,"reticulum_ready":true,"status":{"name":"old"},"status_error":null}')
             if clock[0] == 3:
-                cfg.SNAPSHOT_FILE.write_text('{"collected_at":"2100-01-01T00:00:01+00:00","rnsd_generation":6,"observer_sequence":9,"status":{"name":"new"},"status_error":null}')
+                cfg.SNAPSHOT_FILE.write_text('{"collected_at":"2100-01-01T00:00:01+00:00","rnsd_generation":6,"observer_sequence":9,"reticulum_ready":true,"status":{"name":"new"},"status_error":null}')
         try:
             cfg.RESTART_HEALTH_TIMEOUT=10; cfg.rnsd_generation=generation; cfg.time.monotonic=lambda:clock[0]; cfg.time.sleep=tick
             ok, _, verification=cfg.health(True, 5, "CFG-20261010-051834-A1B2C3")
@@ -74,13 +74,21 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_unhealthy_new_observer_snapshot_causes_rollback(self):
         old_runtime, old_health=cfg.apply_runtime,cfg.health
-        responses=iter([(False,"observer status error: unavailable",{"restart_verified":False}), (True,"recovered",{"restart_verified":True})])
+        responses=iter([(True,"preflight"), (False,"observer status error: unavailable",{"restart_verified":False}), (True,"recovered",{"restart_verified":True})])
         try:
             cfg.apply_runtime=lambda change, operation_id=None:(True,"rnsd_restart","",5)
             cfg.health=lambda *args, **kwargs:next(responses)
             result=cfg.apply_change("admin","test",{"kind":"global","setting":"enable_transport","value":True},"CFG-20261010-051834-A1B2C3")
         finally: cfg.apply_runtime,cfg.health=old_runtime,old_health
         self.assertFalse(result["ok"]); self.assertTrue(result["rolled_back"]); self.assertIn("enable_transport = No",cfg.read_config())
+
+    def test_unhealthy_runtime_refuses_restart_change_without_mutating_config(self):
+        old_health=cfg.health
+        try:
+            cfg.health=lambda *args, **kwargs:(False,"observer reports Reticulum shared instance unavailable")
+            result=cfg.apply_change("admin","test",{"kind":"global","setting":"enable_transport","value":True},"CFG-20261010-051835-A1B2C3")
+        finally: cfg.health=old_health
+        self.assertFalse(result["ok"]); self.assertTrue(result["preflight_failed"]); self.assertIn("enable_transport = No",cfg.read_config())
 
     def test_operation_id_prevents_duplicate_apply(self):
         operation = "CFG-20261010-051834-A1B2C3"

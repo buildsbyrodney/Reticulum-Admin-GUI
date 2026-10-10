@@ -196,7 +196,7 @@ def record_config_change(result, change):
     old = ", ".join(f"{x.get('section')}.{x.get('key')}={x.get('old')}" for x in diff)[:1000]
     new = ", ".join(f"{x.get('section')}.{x.get('key')}={x.get('new')}" for x in diff)[:1000]
     snapshot_id = (result.get("snapshot") or {}).get("id")
-    status = "Applied" if result.get("ok") else "Result Unknown / Verification Timed Out" if result.get("unknown") else "Rolled Back" if result.get("rolled_back") else "Failed"
+    status = "Applied" if result.get("ok") else "Result Unknown / Verification Timed Out" if result.get("unknown") else "Rolled Back" if result.get("rolled_back") else "Recovery Failed" if result.get("recovery_failed") else "Failed"
     with db() as con: con.execute("INSERT INTO config_changes(occurred_at,admin,setting,old_value,new_value,snapshot_id,apply_method,result,rolled_back,error,operation_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (now(), session.get("admin", "admin"), setting, old, new, snapshot_id, result.get("apply_method"), status, int(bool(result.get("rolled_back"))), result.get("error") or result.get("rollback_error"), result.get("operation_id")))
     kind = "config_changed" if result.get("ok") else "config_unknown" if result.get("unknown") else "config_rollback"
     message = f"Configuration {setting}: {'applied' if result.get('ok') else 'result unknown' if result.get('unknown') else 'rolled back' if result.get('rolled_back') else 'failed'}"
@@ -213,7 +213,7 @@ def system_info():
         values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line)
         memory = values.get("MemTotal", "Unavailable").strip()
     except OSError: pass
-    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.2.2"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
+    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.2.3"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
@@ -350,7 +350,7 @@ def blackholes():
 @login_required
 def system():
     snap, _, _ = ingest_snapshot(); caps=management("/capabilities")
-    checks={"rnsd heartbeat":snap["running"], "observer snapshot":bool(snap.get("collected_at")), "rnstatus":not bool(snap.get("status_error")), "rnpath":not bool(snap.get("path_error")), "management agent":bool(caps.get("capabilities")), "admin database":True}
+    checks={"Container running":snap["running"], "Reticulum ready":snap.get("reticulum_ready") is True and not bool(snap.get("status_error")), "observer snapshot":bool(snap.get("collected_at")), "rnpath":not bool(snap.get("path_error")), "management agent":bool(caps.get("capabilities")), "admin database":True}
     return render_template("system.html", title="System", info=system_info(), snap=snap, checks=checks, capabilities=caps.get("capabilities", {}))
 
 @app.get("/announces")
