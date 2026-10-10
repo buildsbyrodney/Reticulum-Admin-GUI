@@ -30,6 +30,7 @@ except ZoneInfoNotFoundError:
 
 app = Flask(__name__)
 app.config.update(SECRET_KEY=os.environ.get("ADMIN_SECRET_KEY"), SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
+CONFIG_VIEW_CACHE = {"config": None}
 if not app.config["SECRET_KEY"]:
     raise RuntimeError("ADMIN_SECRET_KEY must be set")
 
@@ -71,7 +72,7 @@ def csrf_token():
 
 @app.context_processor
 def common_values():
-    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes}
+    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.2.6")}
 
 def require_csrf():
     if not secrets.compare_digest(session.get("csrf", ""), request.form.get("csrf_token", "")): abort(400, "Invalid form token")
@@ -201,6 +202,49 @@ def record_config_change(result, change):
     kind = "config_changed" if result.get("ok") else "config_unknown" if result.get("unknown") else "config_rollback"
     message = f"Configuration {setting}: {'applied' if result.get('ok') else 'result unknown' if result.get('unknown') else 'rolled back' if result.get('rolled_back') else 'failed'}"
     audit(kind, message, "info" if result.get("ok") else "warning" if result.get("unknown") else "error", detail={"snapshot_id": snapshot_id, "apply_method": result.get("apply_method"), "operation_id": result.get("operation_id")})
+
+def update_config_view_cache(change):
+    config = CONFIG_VIEW_CACHE.get("config")
+    if not config: return
+    if change.get("kind") == "global": config.setdefault("global", {})[change.get("setting")] = "Yes" if change.get("value") is True else "No" if change.get("value") is False else str(change.get("value"))
+    elif change.get("kind") == "interface":
+        for item in config.get("interfaces", []):
+            if item.get("name") == change.get("name"):
+                for key, value in (change.get("changes") or {}).items():
+                    if key in ("enabled", "mode"): item[key] = "Yes" if value is True else "No" if value is False else str(value)
+                    else: item.setdefault("fields", {})[key] = "Configured" if "passphrase" in key else str(value)
+                break
+
+def display_config_value(value, secret_value=False):
+    """Use the same safe values in a local review that the UI uses elsewhere."""
+    if secret_value:
+        return "Changed"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    return value
+
+def local_config_preview(change):
+    """Build an immediate, read-only review from the model already shown to admin.
+
+    The management agent remains authoritative at Apply time.  A review must not
+    wait behind a long-running restart or recovery request in its single worker.
+    """
+    config = CONFIG_VIEW_CACHE.get("config") or {}
+    diff = []
+    if change.get("kind") == "global":
+        setting = change.get("setting")
+        old = (config.get("global") or {}).get(setting)
+        diff.append({"section": "reticulum", "key": setting, "old": display_config_value(old), "new": display_config_value(change.get("value"))})
+        return {"ok": True, "diff": diff, "local_review": True}
+
+    name = change.get("name")
+    item = next((row for row in config.get("interfaces", []) if row.get("name") == name), {})
+    fields = item.get("fields") or {}
+    for key, value in (change.get("changes") or {}).items():
+        old = item.get(key) if key in ("enabled", "mode") else fields.get(key)
+        is_secret = "passphrase" in key.lower()
+        diff.append({"section": name or "interface", "key": key, "old": display_config_value(old, is_secret and old is not None), "new": display_config_value(value, is_secret)})
+    return {"ok": True, "diff": diff, "local_review": True}
 
 def recovery_preview(form):
     target = {"identity":form.get("identity", "").strip(), "transport":form.get("transport", "").strip(), "destination":form.get("destination", "").strip(), "interface":form.get("interface", "").strip()}
@@ -368,7 +412,9 @@ def queues():
 @app.get("/configuration")
 @login_required
 def configuration():
-    result = management("/config", timeout=float(os.environ.get("MANAGEMENT_PREVIEW_TIMEOUT", "5")))
+    cached = CONFIG_VIEW_CACHE.get("config")
+    result = {"config": cached, "ok": True} if cached else management("/config", timeout=float(os.environ.get("MANAGEMENT_PREVIEW_TIMEOUT", "5")))
+    if result.get("ok") and result.get("config"): CONFIG_VIEW_CACHE["config"] = result["config"]
     with db() as con: changes=con.execute("SELECT * FROM config_changes ORDER BY occurred_at DESC LIMIT 50").fetchall()
     return render_template("configuration.html", title="Configuration", config=result.get("config", {}), error=result.get("error"), changes=changes)
 
@@ -385,10 +431,10 @@ def configuration_preview():
             value=request.form.get(key)
             if value not in (None, ""): changes[key] = (value.lower() in ("on","yes","true","1")) if key == "enabled" else (int(value) if key in ("ifac_size","listen_port","target_port") and value.isdigit() else value)
         change={"kind":"interface","name":request.form.get("name"),"changes":changes}
-    result=management("/config/preview", {"change":change}, timeout=float(os.environ.get("MANAGEMENT_PREVIEW_TIMEOUT", "5")))
-    if not result.get("ok"):
-        message = "Configuration preview is temporarily unavailable; no change was applied." if result.get("unknown") else result.get("error", "Configuration validation failed")
-        flash(message, "error"); return redirect(url_for("configuration"))
+    # This must be instant: it is only a review of the submitted values.  The
+    # allowlisted management agent validates the same change against the live
+    # config immediately before it writes anything in configuration_apply().
+    result = local_config_preview(change)
     operation_id = f"CFG-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(3).upper()}"
     session["config_change"]={"change":change,"reason":request.form.get("reason", "Configuration change")[:240], "operation_id":operation_id}
     return render_template("configuration_preview.html", title="Review Configuration Change", preview=result, change=change)
@@ -400,6 +446,7 @@ def configuration_apply():
     if not item: abort(400, "No configuration change to apply")
     result=management("/config/apply", {"admin":session["admin"],"reason":item["reason"],"change":item["change"],"operation_id":item["operation_id"]})
     result.setdefault("operation_id", item["operation_id"])
+    if result.get("ok"): update_config_view_cache(item["change"])
     record_config_change(result, item["change"])
     flash("Configuration applied and restart verified." if result.get("ok") and result.get("restart_verified") else "Configuration applied." if result.get("ok") else "The management operation did not return a result in time. Reticulum may still have applied the change; check current status before retrying." if result.get("unknown") else "Configuration failed and was rolled back." if result.get("rolled_back") else "Configuration failed; recovery needs attention.", "success" if result.get("ok") else "error")
     return redirect(url_for("configuration"))
