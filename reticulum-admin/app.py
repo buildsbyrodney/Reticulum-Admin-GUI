@@ -1,0 +1,398 @@
+import json
+import os
+import re
+import secrets
+import sqlite3
+import threading
+import urllib.error
+import urllib.request
+import platform
+import time
+from datetime import datetime, timezone
+from functools import wraps
+from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from flask import Flask, abort, flash, redirect, render_template, request, session, url_for
+from werkzeug.security import check_password_hash, generate_password_hash
+
+APP_DATA = Path(os.environ.get("APP_DATA", "/var/lib/reticulum-admin"))
+DB_PATH = APP_DATA / "admin.db"
+RETICULUM_DIR = Path(os.environ.get("RETICULUM_DIR", "/reticulum"))
+TIMEZONE_NAME = os.environ.get("SERVER_TIMEZONE", "America/Chicago")
+try:
+    SERVER_TIMEZONE = ZoneInfo(TIMEZONE_NAME)
+except ZoneInfoNotFoundError:
+    SERVER_TIMEZONE = timezone.utc
+    TIMEZONE_NAME = "UTC"
+
+app = Flask(__name__)
+app.config.update(SECRET_KEY=os.environ.get("ADMIN_SECRET_KEY"), SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
+if not app.config["SECRET_KEY"]:
+    raise RuntimeError("ADMIN_SECRET_KEY must be set")
+
+def now(): return int(time.time())
+
+def db():
+    APP_DATA.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(DB_PATH, timeout=15); con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+    con.executescript("""
+      CREATE TABLE IF NOT EXISTS admins (username TEXT PRIMARY KEY, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, occurred_at INTEGER NOT NULL, kind TEXT NOT NULL, severity TEXT NOT NULL DEFAULT 'info', interface_name TEXT, remote_ip TEXT, message TEXT NOT NULL, detail_json TEXT);
+      CREATE TABLE IF NOT EXISTS connections (id INTEGER PRIMARY KEY, connection_key TEXT NOT NULL, started_at INTEGER NOT NULL, disconnected_at INTEGER, remote_ip TEXT, interface_name TEXT, rx_bytes INTEGER, tx_bytes INTEGER, announces INTEGER, path_requests INTEGER, correlation TEXT, status TEXT NOT NULL DEFAULT 'active');
+      CREATE TABLE IF NOT EXISTS labels (entity_type TEXT NOT NULL, entity_value TEXT NOT NULL, label TEXT NOT NULL, notes TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY(entity_type, entity_value));
+      CREATE TABLE IF NOT EXISTS observer_state (state_key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS incidents (id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, admin TEXT NOT NULL, target_json TEXT NOT NULL, actions_json TEXT NOT NULL, preview_json TEXT NOT NULL, results_json TEXT, notes TEXT, status TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS events_filter_idx ON events(occurred_at, kind, interface_name, remote_ip);
+      CREATE INDEX IF NOT EXISTS connections_active_idx ON connections(connection_key, status);
+    """)
+    return con
+
+def format_time(value):
+    if not value: return "—"
+    return datetime.fromtimestamp(value, timezone.utc).astimezone(SERVER_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+def format_bytes(value):
+    if value is None: return "—"
+    value = int(value); units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    for unit in units:
+        if value < 1024 or unit == units[-1]: return f"{value:.1f} {unit}" if unit != "B" else f"{value} B"
+        value /= 1024
+
+def csrf_token():
+    session.setdefault("csrf", secrets.token_urlsafe(32)); return session["csrf"]
+
+@app.context_processor
+def common_values():
+    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes}
+
+def require_csrf():
+    if not secrets.compare_digest(session.get("csrf", ""), request.form.get("csrf_token", "")): abort(400, "Invalid form token")
+
+def is_configured():
+    with db() as con: return con.execute("SELECT 1 FROM admins LIMIT 1").fetchone() is not None
+
+def audit(kind, message, severity="info", interface=None, ip=None, detail=None):
+    with db() as con: con.execute("INSERT INTO events(occurred_at,kind,severity,interface_name,remote_ip,message,detail_json) VALUES(?,?,?,?,?,?,?)", (now(), kind, severity, interface, ip, message, json.dumps(detail) if detail else None))
+
+def login_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not session.get("admin"): return redirect(url_for("login"))
+        ingest_snapshot()
+        return view(*args, **kwargs)
+    return wrapped
+
+def snapshot():
+    heartbeat = RETICULUM_DIR / "admin-status" / "rnsd.heartbeat"; path = RETICULUM_DIR / "admin-status" / "snapshot.json"
+    result = {"status": None, "status_error": "No observer snapshot yet.", "paths": None, "path_error": None, "collected_at": None, "rns_version": None}
+    try: result.update(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError): pass
+    try: result["heartbeat_age"] = round(time.time() - int(heartbeat.read_text().strip()))
+    except (OSError, ValueError): result["heartbeat_age"] = None
+    result["running"] = result["heartbeat_age"] is not None and result["heartbeat_age"] < 45
+    return result
+
+def values(item, *names):
+    for name in names:
+        if name in item and item[name] is not None: return item[name]
+    return None
+
+def as_int(value):
+    try: return int(value)
+    except (ValueError, TypeError): return None
+
+def find_interface_records(data):
+    """Accept rnstatus JSON variants without inventing facts from them."""
+    found = []
+    def walk(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key.lower() in ("interfaces", "interface_stats") and isinstance(child, (list, dict)):
+                    for record in child.values() if isinstance(child, dict) else child:
+                        if isinstance(record, dict): found.append(record)
+                else: walk(child)
+        elif isinstance(value, list):
+            for child in value: walk(child)
+    walk(data); output = []; seen = set()
+    for raw in found:
+        name = str(values(raw, "name", "interface_name", "display_name") or "Unnamed interface")
+        key = (name, str(values(raw, "type", "interface_type") or ""))
+        if key in seen: continue
+        seen.add(key)
+        mode = values(raw, "mode", "interface_mode")
+        mode = {1:"Full", 2:"Point-to-Point", 3:"Access Point", 4:"Roaming", 5:"Boundary", 6:"Gateway", 7:"Internal"}.get(mode, mode)
+        raw_clients = raw.get("clients")
+        client_records = raw_clients if isinstance(raw_clients, (list, dict)) else []
+        output.append({"name": name, "type": values(raw, "type", "interface_type", "class"), "enabled": values(raw, "enabled", "is_enabled"), "status": values(raw, "status", "state", "online"), "mode": mode, "rx": as_int(values(raw, "rxb", "rx_bytes", "received", "rx")), "tx": as_int(values(raw, "txb", "tx_bytes", "sent", "tx")), "announces": as_int(values(raw, "announces", "announce_count", "arxc", "atxc")), "path_requests": as_int(values(raw, "path_requests", "prxc", "ptxc")), "queue": as_int(values(raw, "queue", "queue_depth", "announce_queue", "held_announces", "txbuffered")), "clients": client_records, "client_count": as_int(raw_clients), "raw": raw})
+    return output
+
+def config_interfaces():
+    config = RETICULUM_DIR / "config"
+    if not config.exists(): return []
+    records, current = [], None
+    try: lines = config.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError: return []
+    for line in lines:
+        match = re.match(r"^\s*\[\[(.+?)\]\]", line)
+        if match:
+            if current: records.append(current)
+            current = {"name": match.group(1), "type": None, "enabled": None, "mode": None, "ifac": False, "source": "config"}; continue
+        if not current or "=" not in line: continue
+        key, value = [part.strip() for part in line.split("=", 1)]
+        if key.lower() == "type": current["type"] = value
+        elif key.lower() in ("enabled", "interface_enabled"): current["enabled"] = value.lower() in ("yes", "true", "1")
+        elif key.lower() == "mode": current["mode"] = value
+        elif "ifac" in key.lower(): current["ifac"] = True
+    if current: records.append(current)
+    return records
+
+def transport_enabled():
+    try: contents = (RETICULUM_DIR / "config").read_text(encoding="utf-8", errors="replace")
+    except OSError: return None
+    in_reticulum = False
+    for line in contents.splitlines():
+        if re.match(r"^\s*\[reticulum\]\s*$", line, re.I): in_reticulum = True; continue
+        if re.match(r"^\s*\[", line): in_reticulum = False
+        if in_reticulum and re.match(r"^\s*enable_transport\s*=", line, re.I):
+            return line.split("=", 1)[1].strip().lower() in ("yes", "true", "1")
+    return False
+
+def current_clients(interfaces):
+    clients = []
+    for interface in interfaces:
+        raw_clients = interface["clients"]
+        if isinstance(raw_clients, dict): raw_clients = raw_clients.values()
+        if not isinstance(raw_clients, (list, tuple)) and not hasattr(raw_clients, "__iter__"): continue
+        for raw in raw_clients:
+            if not isinstance(raw, dict): continue
+            ip = values(raw, "remote_ip", "ip", "address", "host")
+            if not ip: continue
+            clients.append({"key": f"{interface['name']}|{ip}", "remote_ip": str(ip), "interface": interface["name"], "connected_at": as_int(values(raw, "connected_at", "connected", "since")), "rx": as_int(values(raw, "rxb", "rx_bytes", "rx")), "tx": as_int(values(raw, "txb", "tx_bytes", "tx")), "announces": as_int(values(raw, "announces", "announce_count")), "path_requests": as_int(values(raw, "path_requests", "prx", "ptx")), "identity": values(raw, "identity", "identity_hash"), "destination": values(raw, "destination", "destination_hash"), "correlation": "confirmed" if values(raw, "identity", "identity_hash", "destination", "destination_hash") else None})
+    return clients
+
+def ingest_snapshot():
+    snap = snapshot(); interfaces = find_interface_records(snap.get("status")) if snap.get("status") else []; clients = current_clients(interfaces)
+    state = {"interfaces": {x["name"]: x["status"] for x in interfaces}, "clients": {x["key"]: x for x in clients}, "client_counts": {x["name"]: x["client_count"] for x in interfaces if x["client_count"] is not None}, "queue_total": sum(x["queue"] or 0 for x in interfaces), "announce_total": sum(x["announces"] or 0 for x in interfaces), "path_count": len(snap.get("paths") or [])}
+    with db() as con:
+        row = con.execute("SELECT value_json FROM observer_state WHERE state_key='latest'").fetchone(); prior = json.loads(row["value_json"]) if row else {"interfaces": {}, "clients": {}, "client_counts": {}, "queue_total": 0, "announce_total": 0, "path_count": 0}
+        for name, status in state["interfaces"].items():
+            if name not in prior["interfaces"]: con.execute("INSERT INTO events(occurred_at,kind,severity,interface_name,message) VALUES(?,?,?,?,?)", (now(), "interface_attached", "info", name, f"Interface {name} observed"))
+            elif status != prior["interfaces"].get(name): con.execute("INSERT INTO events(occurred_at,kind,severity,interface_name,message) VALUES(?,?,?,?,?)", (now(), "interface_status", "warning", name, f"Interface {name} status changed to {status}"))
+        for name in set(prior["interfaces"]) - set(state["interfaces"]): con.execute("INSERT INTO events(occurred_at,kind,severity,interface_name,message) VALUES(?,?,?,?,?)", (now(), "interface_detached", "warning", name, f"Interface {name} no longer observed"))
+        for name, count in state["client_counts"].items():
+            old = prior.get("client_counts", {}).get(name)
+            if old is not None and old != count:
+                direction = "increased" if count > old else "decreased"
+                con.execute("INSERT INTO events(occurred_at,kind,severity,interface_name,message) VALUES(?,?,?,?,?)", (now(), "client_count_changed", "info", name, f"TCP/client count {direction} from {old} to {count} on {name}"))
+        for key, client in state["clients"].items():
+            if key not in prior["clients"]:
+                con.execute("INSERT INTO connections(connection_key,started_at,remote_ip,interface_name,rx_bytes,tx_bytes,announces,path_requests,correlation,status) VALUES(?,?,?,?,?,?,?,?,?, 'active')", (key, now(), client["remote_ip"], client["interface"], client["rx"], client["tx"], client["announces"], client["path_requests"], client["correlation"]))
+                con.execute("INSERT INTO events(occurred_at,kind,severity,interface_name,remote_ip,message) VALUES(?,?,?,?,?,?)", (now(), "client_connected", "info", client["interface"], client["remote_ip"], f"Client {client['remote_ip']} connected on {client['interface']}"))
+            else: con.execute("UPDATE connections SET rx_bytes=?,tx_bytes=?,announces=?,path_requests=? WHERE connection_key=? AND status='active'", (client["rx"], client["tx"], client["announces"], client["path_requests"], key))
+        for key, client in prior["clients"].items():
+            if key not in state["clients"]:
+                con.execute("UPDATE connections SET disconnected_at=?,status='disconnected' WHERE connection_key=? AND status='active'", (now(), key)); con.execute("INSERT INTO events(occurred_at,kind,severity,interface_name,remote_ip,message) VALUES(?,?,?,?,?,?)", (now(), "client_disconnected", "info", client.get("interface"), client.get("remote_ip"), f"Client {client.get('remote_ip')} disconnected from {client.get('interface')}"))
+        if state["queue_total"] >= 100 and state["queue_total"] > prior.get("queue_total", 0): con.execute("INSERT INTO events(occurred_at,kind,severity,message) VALUES(?,?,?,?)", (now(), "queue_warning", "warning", f"Queue depth increased to {state['queue_total']}"))
+        if state["announce_total"] - prior.get("announce_total", 0) >= 100: con.execute("INSERT INTO events(occurred_at,kind,severity,message) VALUES(?,?,?,?)", (now(), "announce_rate", "warning", f"High announce activity: {state['announce_total'] - prior['announce_total']} new announces"))
+        if state["path_count"] - prior.get("path_count", 0) >= 25: con.execute("INSERT INTO events(occurred_at,kind,severity,message) VALUES(?,?,?,?)", (now(), "path_growth", "warning", f"{state['path_count'] - prior['path_count']} new paths learned"))
+        con.execute("INSERT INTO observer_state(state_key,value_json,updated_at) VALUES('latest',?,?) ON CONFLICT(state_key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at", (json.dumps(state), now()))
+    return snap, interfaces, clients
+
+def labels():
+    with db() as con: return {(x["entity_type"], x["entity_value"]): dict(x) for x in con.execute("SELECT * FROM labels")}
+
+def management(path, body=None):
+    token = os.environ.get("MANAGEMENT_TOKEN", ""); base = os.environ.get("MANAGEMENT_URL", "")
+    if not token or not base: return {"ok": False, "error": "Management agent is not configured"}
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(base+path, data=data, headers={"X-Management-Token":token, "Content-Type":"application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=25) as response: return json.loads(response.read())
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as error: return {"ok":False,"error":str(error)}
+
+def recovery_preview(form):
+    target = {"identity":form.get("identity", "").strip(), "transport":form.get("transport", "").strip(), "destination":form.get("destination", "").strip(), "interface":form.get("interface", "").strip()}
+    actions = [key for key in ("blackhole","drop_via","drop_announces","attach","detach","reload") if form.get(key)]
+    return {"target":target, "actions":actions, "duration":form.get("duration", ""), "reason":form.get("reason", ""), "queue_warning": "Drop queued announces clears local queues globally." if "drop_announces" in actions else None}
+
+def system_info():
+    memory = "Unavailable"
+    try:
+        values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line)
+        memory = values.get("MemTotal", "Unavailable").strip()
+    except OSError: pass
+    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.1.0"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
+
+@app.route("/setup", methods=["GET", "POST"])
+def setup():
+    if is_configured(): return redirect(url_for("dashboard"))
+    if request.method == "POST":
+        require_csrf(); username = request.form.get("username", "").strip(); password = request.form.get("password", "")
+        if len(username) < 3 or len(password) < 12 or password != request.form.get("confirmation", ""): flash("Use a username of at least 3 characters and matching password of at least 12 characters.", "error")
+        else:
+            with db() as con: con.execute("INSERT INTO admins VALUES (?, ?, ?)", (username, generate_password_hash(password), now()))
+            session["admin"] = username; audit("admin_setup", "First administrator account created"); return redirect(url_for("dashboard"))
+    return render_template("setup.html", title="First-run setup")
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not is_configured(): return redirect(url_for("setup"))
+    if request.method == "POST":
+        require_csrf(); username = request.form.get("username", "").strip()
+        with db() as con: account = con.execute("SELECT * FROM admins WHERE username=?", (username,)).fetchone()
+        if account and check_password_hash(account["password_hash"], request.form.get("password", "")):
+            session.clear(); session["admin"] = username; csrf_token(); audit("admin_login", f"Administrator {username} signed in"); return redirect(url_for("dashboard"))
+        flash("Invalid username or password.", "error")
+    return render_template("login.html", title="Sign in")
+
+@app.post("/logout")
+def logout(): require_csrf(); session.clear(); return redirect(url_for("login"))
+
+@app.get("/")
+@login_required
+def dashboard():
+    snap, interfaces, clients = ingest_snapshot(); configured = config_interfaces()
+    with db() as con:
+        recent = con.execute("SELECT * FROM events ORDER BY occurred_at DESC LIMIT 8").fetchall(); warnings = con.execute("SELECT COUNT(*) AS n FROM events WHERE severity='warning' AND occurred_at>?", (now()-86400,)).fetchone()["n"]
+    return render_template("dashboard.html", title="Dashboard", snap=snap, interfaces=interfaces, configured=configured, clients=clients, client_count=sum(x["client_count"] or 0 for x in interfaces), transport=transport_enabled(), recent=recent, warnings=warnings)
+
+@app.get("/interfaces")
+@login_required
+def interfaces():
+    snap, observed, _ = ingest_snapshot(); by_name = {x["name"]: x for x in observed}; rows = []
+    for item in config_interfaces(): rows.append({**item, **{k:v for k,v in by_name.get(item["name"], {}).items() if v is not None}})
+    for name, item in by_name.items():
+        if not any(row["name"] == name for row in rows): rows.append(item)
+    return render_template("interfaces.html", title="Interfaces", rows=rows, error=snap.get("status_error"))
+
+@app.get("/clients")
+@login_required
+def clients():
+    _, _, current = ingest_snapshot(); known = labels()
+    for client in current: client["label"] = known.get(("ip", client["remote_ip"]), {}).get("label")
+    with db() as con: history = con.execute("SELECT * FROM connections ORDER BY started_at DESC LIMIT 100").fetchall()
+    return render_template("clients.html", title="Connected Clients", clients=current, history=history, labels=known)
+
+@app.post("/labels")
+@login_required
+def save_label():
+    require_csrf(); entity_type = request.form.get("entity_type", "ip"); entity_value = request.form.get("entity_value", "").strip(); label = request.form.get("label", "").strip(); notes = request.form.get("notes", "").strip()
+    if entity_type not in ("ip", "identity", "destination", "transport") or not entity_value or len(label) > 80: abort(400, "Invalid label")
+    with db() as con: con.execute("INSERT INTO labels VALUES(?,?,?,?,?) ON CONFLICT(entity_type,entity_value) DO UPDATE SET label=excluded.label,notes=excluded.notes,updated_at=excluded.updated_at", (entity_type, entity_value, label, notes, now()))
+    audit("label_changed", f"Label updated for {entity_type} {entity_value}"); flash("Label saved.", "success"); return redirect(request.referrer or url_for("clients"))
+
+@app.get("/timeline")
+@login_required
+def timeline():
+    clauses, args = [], []
+    for key, column in (("kind", "kind"), ("severity", "severity"), ("interface", "interface_name"), ("ip", "remote_ip")):
+        value = request.args.get(key, "").strip()
+        if value: clauses.append(f"{column} = ?" if key in ("kind", "severity") else f"{column} LIKE ?"); args.append(value if key in ("kind", "severity") else f"%{value}%")
+    since = request.args.get("since", "").strip()
+    if since:
+        try: clauses.append("occurred_at >= ?"); args.append(int(datetime.fromisoformat(since).replace(tzinfo=SERVER_TIMEZONE).timestamp()))
+        except ValueError: flash("Invalid date/time filter.", "error")
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    with db() as con: events = con.execute("SELECT * FROM events" + where + " ORDER BY occurred_at DESC LIMIT 500", args).fetchall()
+    return render_template("timeline.html", title="Timeline", events=events)
+
+@app.get("/logs")
+@login_required
+def logs():
+    query = request.args.get("q", "").lower(); severity = request.args.get("severity", ""); lines = []
+    for candidate in (RETICULUM_DIR / "logfile", RETICULUM_DIR / "logs" / "logfile"):
+        try: lines = candidate.read_text(encoding="utf-8", errors="replace").splitlines()[-500:]; break
+        except OSError: continue
+    secret = re.compile(r"(?i)(ifac[_ -]?(?:key|passphrase)?\s*=\s*)\S+|((?:ADMIN_SECRET_KEY|password_hash)\s*=\s*)\S+")
+    lines = [secret.sub(lambda m: (m.group(1) or m.group(2)) + "[REDACTED]", line) for line in lines]
+    if query: lines = [line for line in lines if query in line.lower()]
+    if severity: lines = [line for line in lines if severity.lower() in line.lower()]
+    return render_template("logs.html", title="Logs", lines=reversed(lines))
+
+@app.get("/paths")
+@login_required
+def paths():
+    snap, _, _ = ingest_snapshot()
+    return render_template("paths.html", title="Paths", paths=snap.get("paths") or [], error=snap.get("path_error"), known=labels())
+
+@app.route("/recovery", methods=["GET", "POST"])
+@login_required
+def recovery():
+    capabilities = management("/capabilities").get("capabilities", {})
+    if request.method == "POST":
+        require_csrf(); preview = recovery_preview(request.form); session["recovery_preview"] = preview
+        if not preview["actions"]: flash("Select at least one recovery action.", "error"); return redirect(url_for("recovery"))
+        return render_template("recovery_preview.html", title="Recovery Preview", preview=preview, capabilities=capabilities)
+    return render_template("recovery.html", title="Incident Recovery", capabilities=capabilities)
+
+@app.post("/recovery/apply")
+@login_required
+def recovery_apply():
+    require_csrf(); preview = session.pop("recovery_preview", None)
+    if not preview: abort(400, "No recovery preview")
+    if "drop_announces" in preview["actions"] and request.form.get("typed_drop") != "DROP ANNOUNCES": abort(400, "Typed confirmation required")
+    if "detach" in preview["actions"] and request.form.get("typed_detach") != "DETACH": abort(400, "Typed confirmation required")
+    results=[]; status="Completed"
+    op_map={"blackhole":"blackhole", "drop_via":"drop_via", "drop_announces":"drop_announces", "attach":"attach", "detach":"detach", "reload":"reload"}
+    payloads={"blackhole":{"identity":preview["target"]["identity"],"duration":preview["duration"],"reason":preview["reason"]},"drop_via":{"transport":preview["target"]["transport"]},"drop_announces":{},"attach":{"interface":preview["target"]["interface"]},"detach":{"interface":preview["target"]["interface"]},"reload":{"interface":preview["target"]["interface"]}}
+    for action in preview["actions"]:
+        result=management("/execute", {"operation":op_map[action],"payload":payloads[action]}); results.append(result)
+        audit("recovery_"+action, f"Recovery {action}: {'succeeded' if result.get('ok') else 'failed'}", "info" if result.get("ok") else "error", preview["target"].get("interface") or None, detail={"target":preview["target"],"result":result})
+        if not result.get("ok"): status="Partially completed" if any(x.get("ok") for x in results) else "Failed"; break
+    with db() as con: con.execute("INSERT INTO incidents(started_at,admin,target_json,actions_json,preview_json,results_json,status) VALUES(?,?,?,?,?,?,?)", (now(),session["admin"],json.dumps(preview["target"]),json.dumps(preview["actions"]),json.dumps(preview),json.dumps(results),status))
+    flash(f"Incident recovery {status.lower()}.", "success" if status == "Completed" else "error"); return redirect(url_for("incident_history"))
+
+@app.get("/incidents")
+@login_required
+def incident_history():
+    with db() as con: rows=con.execute("SELECT * FROM incidents ORDER BY started_at DESC LIMIT 100").fetchall()
+    return render_template("incidents.html", title="Incident History", rows=rows)
+
+@app.get("/blackholes")
+@login_required
+def blackholes():
+    result=management("/execute", {"operation":"list_blackholes","payload":{}})
+    return render_template("blackholes.html", title="Blackholes", result=result, known=labels())
+
+@app.get("/system")
+@login_required
+def system():
+    snap, _, _ = ingest_snapshot(); caps=management("/capabilities")
+    checks={"rnsd heartbeat":snap["running"], "observer snapshot":bool(snap.get("collected_at")), "rnstatus":not bool(snap.get("status_error")), "rnpath":not bool(snap.get("path_error")), "management agent":bool(caps.get("capabilities")), "admin database":True}
+    return render_template("system.html", title="System", info=system_info(), snap=snap, checks=checks, capabilities=caps.get("capabilities", {}))
+
+@app.get("/announces")
+@login_required
+def announces():
+    _, interfaces, _ = ingest_snapshot()
+    return render_template("announces.html", title="Announces", rows=interfaces)
+
+@app.get("/queues")
+@login_required
+def queues():
+    _, interfaces, _ = ingest_snapshot()
+    return render_template("queues.html", title="Queues", rows=interfaces)
+
+@app.get("/<page>")
+@login_required
+def read_only_page(page):
+    if page not in ("configuration",): abort(404)
+    return render_template("read_only.html", title=page.title(), text="This is intentionally read-only. The dashboard and Interfaces views show metrics when rnstatus exposes them; no control operations are enabled.", raw=None)
+
+def collector():
+    """Persist observer changes even while nobody has the dashboard open."""
+    last_cleanup = 0
+    while True:
+        try:
+            ingest_snapshot()
+            if now() - last_cleanup > 21600:
+                days = max(1, int(os.environ.get("EVENT_RETENTION_DAYS", "90")))
+                with db() as con: con.execute("DELETE FROM events WHERE occurred_at < ?", (now() - days*86400,))
+                last_cleanup = now()
+        except Exception: pass
+        time.sleep(15)
+
+if os.environ.get("OBSERVATION_COLLECTOR", "true").lower() == "true":
+    threading.Thread(target=collector, name="reticulum-observer-collector", daemon=True).start()
