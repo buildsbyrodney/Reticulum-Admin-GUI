@@ -18,7 +18,6 @@ COMMON = {"enabled", "mode", "network_name", "passphrase", "ifac_size"}
 TYPE_FIELDS = {
     "TCPServerInterface": COMMON | {"listen_ip", "listen_port"},
     "TCPClientInterface": COMMON | {"target_host", "target_port"},
-    "RNodeInterface": COMMON | {"port", "frequency", "bandwidth", "txpower", "spreadingfactor", "codingrate"},
 }
 
 def utc_now(): return datetime.now(timezone.utc).isoformat()
