@@ -82,7 +82,7 @@ Open the printed URL and create the required first administrator account.
 
 The `rnsd` container includes a non-networked observer that queries the local shared instance using `rnstatus --json --all --totals --queues --announce-stats --pr-stats` and `rnpath --table --json` every 15 seconds. It writes a sanitized snapshot into the persistent Reticulum directory. The GUI reads that snapshot only.
 
-Available data depends on the installed Reticulum interface and version. Dashboard, Interfaces, Timeline, Connected Clients, and Logs show fields only when Reticulum explicitly supplies them. Queue, RX/TX, announce, and path-request values appear when available. IFAC passphrases remain redacted; the Configuration editor shows only whether a passphrase is configured. Recent logs are redacted before display.
+Available data depends on the installed Reticulum interface and version. Dashboard, Interfaces, Timeline, Connected Clients, and Logs show fields only when Reticulum explicitly supplies them. Queue, RX/TX, announce, and path-request values appear when available. IFAC passphrases are viewable in authenticated interface configuration pages so operators can distribute shared interface credentials; they remain redacted from logs, review diffs, change history, and displayed snapshot metadata. Recent logs are redacted before display.
 
 SQLite lives at `data/admin/admin.db`. It stores password hashes, timeline events, connection history, labels/notes, and observer state. Timestamps are stored in UTC and rendered with `SERVER_TIMEZONE`.
 

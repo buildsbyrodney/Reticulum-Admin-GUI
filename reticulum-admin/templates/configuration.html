@@ -29,8 +29,8 @@
     <details>
       <summary>Advanced Interface Controls</summary>
       <label>Network name<input name="network_name" value="{{ item.fields.get('network_name', item.fields.get('ifac_netname','')) }}"></label>
-      <p>IFAC passphrase: {{ 'configured' if item.fields.get('passphrase') or item.fields.get('ifac_passphrase') else 'not configured' }}</p>
-      <label>New IFAC passphrase<input name="passphrase" type="password" placeholder="Leave blank to keep the configured value" spellcheck="false" autocomplete="new-password"></label>
+      <label>IFAC passphrase<input value="{{ item.fields.get('passphrase', item.fields.get('ifac_passphrase','')) }}" readonly spellcheck="false" autocomplete="off"></label>
+      <label>New IFAC passphrase<input name="passphrase" type="text" placeholder="Leave blank to keep the configured value" spellcheck="false" autocomplete="off"></label>
       <label>IFAC size<input name="ifac_size" type="number" value="{{ item.fields.get('ifac_size','') }}"></label>
       <p class="muted">Leave this at the interface default unless you have a specific reason to change it. Reticulum's custom-interface example uses an 8-byte default (64 bits), which is a common default.</p>
       {% if item.type == 'TCPServerInterface' %}

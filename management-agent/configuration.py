@@ -66,10 +66,11 @@ def public_model(text=None):
         values = section["settings"]
         item = {"name": section["name"], "type": values.get("type"), "enabled": values.get("enabled"), "mode": values.get("mode"), "fields": {}}
         for key in COMMON | {"ifac_netname", "ifac_passphrase", "listen_ip", "listen_port", "target_host", "target_port", "port", "frequency", "bandwidth", "txpower", "spreadingfactor", "codingrate"}:
-            # The browser only needs to know that a credential exists. Keeping
-            # it out of the public model prevents accidental disclosure in UI,
-            # browser history, screenshots, and cached configuration views.
-            if key in values: item["fields"][key] = "Configured" if secret(key) else values[key]
+            # IFAC is a shared interface credential that operators distribute
+            # to connecting nodes. It is viewable only through the authenticated
+            # internal management API; diffs, logs, audit records, and snapshot
+            # metadata continue to redact it.
+            if key in values: item["fields"][key] = values[key]
         interfaces.append(item)
     return {"hash": config_hash(text), "global": {"enable_transport": global_settings.get("enable_transport", "No"), "loglevel": global_settings.get("loglevel")}, "interfaces": interfaces, "version": os.environ.get("RNS_VERSION", "1.5.7")}
 

@@ -20,16 +20,16 @@ class ConfigurationTests(unittest.TestCase):
         diff=cfg.redacted_diff(SAMPLE,candidate); secret=[x for x in diff if x["key"] == "passphrase"][0]
         self.assertEqual(secret["old"],"Changed"); self.assertEqual(secret["new"],"Changed")
 
-    def test_authenticated_configuration_model_redacts_ifac_values(self):
+    def test_authenticated_configuration_model_includes_ifac_values(self):
         model = cfg.public_model(SAMPLE)
         interface = model["interfaces"][0]
-        self.assertEqual(interface["fields"]["passphrase"], "Configured")
+        self.assertEqual(interface["fields"]["passphrase"], "private-value")
 
     def test_configuration_model_recognises_reticulum_ifac_field_names(self):
         text = """[reticulum]\n\n[[Shared TCP]]\ntype = TCPServerInterface\nifac_netname = shared\nifac_passphrase = shared-credential\nifac_size = 8\n"""
         interface = cfg.public_model(text)["interfaces"][0]
         self.assertEqual(interface["fields"]["ifac_netname"], "shared")
-        self.assertEqual(interface["fields"]["ifac_passphrase"], "Configured")
+        self.assertEqual(interface["fields"]["ifac_passphrase"], "shared-credential")
         self.assertEqual(interface["fields"]["ifac_size"], "8")
     def test_validation_and_atomic_write(self):
         with self.assertRaises(ValueError): cfg.edit_text(SAMPLE,{"kind":"interface","name":"Public TCP","changes":{"listen_port":70000}})
