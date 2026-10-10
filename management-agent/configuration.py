@@ -83,7 +83,7 @@ def validate_change(change, text=None):
     raise ValueError("Unknown configuration operation")
 
 def replacement_value(key, value):
-    if key == "enabled": return "Yes" if value else "No"
+    if key in ("enabled", "enable_transport"): return "Yes" if value else "No"
     return str(value)
 
 def edit_text(text, change):
