@@ -213,7 +213,7 @@ def system_info():
         values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line)
         memory = values.get("MemTotal", "Unavailable").strip()
     except OSError: pass
-    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.2.4"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
+    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.2.5"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
