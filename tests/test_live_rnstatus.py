@@ -83,7 +83,7 @@ class LiveRnstatusTests(unittest.TestCase):
         self.assertIn("Runtime / System Interfaces", page)
         self.assertIn("System Managed", page)
         self.assertIn("0 B / 0 B", page)
-        self.assertIn(">1</td>", page)
+        self.assertIn(">1 / —</td>", page)
         self.assertIn("Full", page)
         self.assertIn("Up", page)
         self.assertIn("Default Interface", page)
