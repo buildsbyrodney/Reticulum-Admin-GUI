@@ -15,6 +15,7 @@ def healthy(root, maximum_age=45, clock=time.time):
         if snapshot.get("reticulum_ready") is not True: raise ValueError("Reticulum shared instance is unavailable")
         if snapshot.get("status_error"): raise ValueError("observer reported Reticulum status error")
         if not isinstance(snapshot.get("status"), (dict, list)) or not snapshot.get("status"): raise ValueError("observer has no valid Reticulum status")
+        if "Shared Instance[" not in json.dumps(snapshot["status"]): raise ValueError("observer status has no shared instance")
         return True, "healthy"
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error: return False, str(error)
 

@@ -9,7 +9,8 @@ COPY start-rnsd.sh /usr/local/bin/start-rnsd
 COPY observer.py /usr/local/bin/reticulum-observer
 COPY control_helper.py /usr/local/bin/reticulum-control-helper
 COPY check_rnsd_health.py /usr/local/bin/check-rnsd-health
-RUN chmod +x /usr/local/bin/start-rnsd /usr/local/bin/reticulum-observer /usr/local/bin/reticulum-control-helper /usr/local/bin/check-rnsd-health
+COPY check_shared_instance.py /usr/local/bin/check-shared-instance
+RUN chmod +x /usr/local/bin/start-rnsd /usr/local/bin/reticulum-observer /usr/local/bin/reticulum-control-helper /usr/local/bin/check-rnsd-health /usr/local/bin/check-shared-instance
 
 VOLUME ["/root/.reticulum"]
 ENTRYPOINT ["/usr/local/bin/start-rnsd"]

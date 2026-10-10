@@ -74,6 +74,8 @@ docker compose run --rm --entrypoint sh rnsd
 
 The rnsd Docker health check reads the observer snapshot every 15 seconds (5-second timeout, 3 retries, 90-second Pi-friendly startup period). It is healthy only when a fresh snapshot matches the active rnsd generation and confirms the live shared Reticulum instance is ready. A launcher heartbeat alone is not sufficient.
 
+The managed startup order is deliberate: acquire the state lock, start rnsd, verify that `rnstatus` reports the local Shared Instance, record the verified generation, then start the observer and control helper. On restart the observer/helper are stopped first and cannot probe or execute commands during the gap. If the candidate daemon connects as a client to another local instance instead of owning the shared instance, the launcher stops it and remains unhealthy.
+
 Open the printed URL and create the required first administrator account.
 
 ## Observability

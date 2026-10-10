@@ -17,6 +17,7 @@ CONTROL = CONFIG / "admin-control"
 REQUESTS = CONTROL / "requests"
 RESULTS = CONTROL / "results"
 STATUS = CONFIG / "admin-status"
+READY = STATUS / "rnsd.ready"
 HASH = re.compile(r"^[0-9a-fA-F]{32}$")
 NAME = re.compile(r"^[^\x00-\x1f\n\r]{1,100}$")
 OPERATION = re.compile(r"^OP-[A-F0-9]{16}$")
@@ -70,6 +71,7 @@ def write_capabilities():
 def execute(request):
     operation_id, action, payload = request.get("operation_id"), request.get("action"), request.get("payload") or {}
     if not OPERATION.fullmatch(str(operation_id or "")): raise ValueError("Invalid control operation ID")
+    if not READY.exists(): return {"operation_id": operation_id, "operation": action, "ok": False, "error": "Reticulum is not ready; operation was not executed."}
     command = command_for(action, payload)
     result = subprocess.run(command, capture_output=True, text=True, timeout=20)
     return {"operation_id": operation_id, "operation": action, "ok": result.returncode == 0, "returncode": result.returncode, "stdout": result.stdout[-4000:], "stderr": result.stderr[-4000:]}

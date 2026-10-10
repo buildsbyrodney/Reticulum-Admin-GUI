@@ -11,7 +11,7 @@ health = importlib.util.module_from_spec(spec); spec.loader.exec_module(health)
 class RnsdHealthTests(unittest.TestCase):
     def snapshot(self, root, generation=7, ready=True, error=None, collected="2026-10-10T05:00:00+00:00"):
         status=root/"admin-status"; status.mkdir(exist_ok=True); (status/"rnsd.generation").write_text(str(generation))
-        (status/"snapshot.json").write_text(json.dumps({"collected_at":collected,"rnsd_generation":generation,"reticulum_ready":ready,"status_error":error,"status":{"interfaces":[]}}))
+        (status/"snapshot.json").write_text(json.dumps({"collected_at":collected,"rnsd_generation":generation,"reticulum_ready":ready,"status_error":error,"status":{"interfaces":[{"name":"Shared Instance[rns/default]"}]}}))
     def test_missing_or_stale_snapshot_is_unhealthy_even_with_generation_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary); (root/"admin-status").mkdir(); (root/"admin-status"/"rnsd.generation").write_text("7")
