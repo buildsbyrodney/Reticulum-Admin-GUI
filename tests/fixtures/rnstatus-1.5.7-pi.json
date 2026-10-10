@@ -1,0 +1,41 @@
+{
+  "interfaces": [
+    {
+      "clients": 1,
+      "bitrate": 1000000000,
+      "rxs": 0,
+      "txs": 0,
+      "name": "Shared Instance[rns/default]",
+      "type": "LocalServerInterface",
+      "rxb": 0,
+      "txb": 0,
+      "status": true,
+      "mode": 1,
+      "held_announces": 0,
+      "txbuffered": 0,
+      "ifac_signature": null,
+      "ifac_size": null,
+      "ifac_netname": null
+    },
+    {
+      "clients": null,
+      "peers": 0,
+      "name": "AutoInterface[Default Interface]",
+      "type": "AutoInterface",
+      "rxb": 0,
+      "txb": 0,
+      "status": true,
+      "mode": 1
+    },
+    {
+      "clients": null,
+      "name": "LocalClientInterface[test-client]",
+      "type": "LocalClientInterface",
+      "parent_interface_name": "Shared Instance[rns/default]",
+      "rxb": 0,
+      "txb": 0,
+      "status": true,
+      "mode": 1
+    }
+  ]
+}

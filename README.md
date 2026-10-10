@@ -2,7 +2,7 @@
 
 A Docker-based web administration and observability interface for Reticulum nodes. It provides a managed `rnsd` deployment, Dashboard, Interfaces, Paths, Announces, Queues, Logs, Timeline, labels, Blackholes, Incident Recovery, and a narrow internal management agent. Connected-client detail appears only where Reticulum exposes reliable data.
 
-**Supported by design:** Linux with Docker Engine and Docker Compose v2 on `x86_64`, `aarch64`, and `arm64`. Primary target distributions are Debian 12/13, Raspberry Pi OS 64-bit where practical, and Ubuntu Server. **ARM64/Raspberry Pi support is supported by design, pending physical Raspberry Pi validation.**
+**Supported by design:** Linux with Docker Engine and Docker Compose v2 on `x86_64`, `aarch64`, and `arm64`. Primary target distributions are Debian 12/13, Raspberry Pi OS 64-bit where practical, and Ubuntu Server. **Raspberry Pi 3 ARM64 has been physically validated through successful container build and stack start on Debian 64-bit, with Docker 29.9.0, Docker Compose 5.6.0, and Reticulum rns 1.5.7.**
 
 ## Install on Ubuntu/Linux
 
@@ -50,7 +50,7 @@ Rerunning from an installation offers Update, Reconfigure, Repair, or Cancel. Re
 6. Run `./scripts/diagnose.sh` and save its output if troubleshooting is needed.
 7. Exercise only safe test Incident Recovery operations against a test Reticulum instance; record `docker stats` CPU/RAM usage.
 
-The default observer interval is 30 seconds and the web server uses one worker for Pi-friendly idle use. Do not claim memory figures until this checklist has been completed on hardware.
+The default observer interval is 30 seconds and the web server uses one worker for Pi-friendly idle use. The stack has now built and started successfully on a Raspberry Pi 3 running Debian ARM64; collect workload-specific memory figures separately.
 
 For automation, `./install.sh --non-interactive` accepts `ADMIN_PORT`, `ADMIN_ACCESS_MODE`, and `SERVER_TIMEZONE` from the environment (or their defaults). If Docker is missing, it requires the additional explicit opt-in `INSTALL_DOCKER=yes`; it never replaces an existing `.env` in that mode.
 

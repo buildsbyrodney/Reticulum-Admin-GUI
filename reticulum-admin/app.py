@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Flask, abort, flash, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
+from reticulum_adapter import as_int, find_interface_records, values
 
 APP_DATA = Path(os.environ.get("APP_DATA", "/var/lib/reticulum-admin"))
 DB_PATH = APP_DATA / "admin.db"
@@ -94,40 +95,6 @@ def snapshot():
     result["running"] = result["heartbeat_age"] is not None and result["heartbeat_age"] < 45
     return result
 
-def values(item, *names):
-    for name in names:
-        if name in item and item[name] is not None: return item[name]
-    return None
-
-def as_int(value):
-    try: return int(value)
-    except (ValueError, TypeError): return None
-
-def find_interface_records(data):
-    """Accept rnstatus JSON variants without inventing facts from them."""
-    found = []
-    def walk(value):
-        if isinstance(value, dict):
-            for key, child in value.items():
-                if key.lower() in ("interfaces", "interface_stats") and isinstance(child, (list, dict)):
-                    for record in child.values() if isinstance(child, dict) else child:
-                        if isinstance(record, dict): found.append(record)
-                else: walk(child)
-        elif isinstance(value, list):
-            for child in value: walk(child)
-    walk(data); output = []; seen = set()
-    for raw in found:
-        name = str(values(raw, "name", "interface_name", "display_name") or "Unnamed interface")
-        key = (name, str(values(raw, "type", "interface_type") or ""))
-        if key in seen: continue
-        seen.add(key)
-        mode = values(raw, "mode", "interface_mode")
-        mode = {1:"Full", 2:"Point-to-Point", 3:"Access Point", 4:"Roaming", 5:"Boundary", 6:"Gateway", 7:"Internal"}.get(mode, mode)
-        raw_clients = raw.get("clients")
-        client_records = raw_clients if isinstance(raw_clients, (list, dict)) else []
-        output.append({"name": name, "type": values(raw, "type", "interface_type", "class"), "enabled": values(raw, "enabled", "is_enabled"), "status": values(raw, "status", "state", "online"), "mode": mode, "rx": as_int(values(raw, "rxb", "rx_bytes", "received", "rx")), "tx": as_int(values(raw, "txb", "tx_bytes", "sent", "tx")), "announces": as_int(values(raw, "announces", "announce_count", "arxc", "atxc")), "path_requests": as_int(values(raw, "path_requests", "prxc", "ptxc")), "queue": as_int(values(raw, "queue", "queue_depth", "announce_queue", "held_announces", "txbuffered")), "clients": client_records, "client_count": as_int(raw_clients), "raw": raw})
-    return output
-
 def config_interfaces():
     config = RETICULUM_DIR / "config"
     if not config.exists(): return []
@@ -138,13 +105,13 @@ def config_interfaces():
         match = re.match(r"^\s*\[\[(.+?)\]\]", line)
         if match:
             if current: records.append(current)
-            current = {"name": match.group(1), "type": None, "enabled": None, "mode": None, "ifac": False, "source": "config"}; continue
+            current = {"name": match.group(1), "type": None, "enabled": None, "mode": None, "ifac_enabled": False, "source": "config"}; continue
         if not current or "=" not in line: continue
         key, value = [part.strip() for part in line.split("=", 1)]
         if key.lower() == "type": current["type"] = value
         elif key.lower() in ("enabled", "interface_enabled"): current["enabled"] = value.lower() in ("yes", "true", "1")
         elif key.lower() == "mode": current["mode"] = value
-        elif "ifac" in key.lower(): current["ifac"] = True
+        elif "ifac" in key.lower(): current["ifac_enabled"] = True
     if current: records.append(current)
     return records
 
@@ -162,9 +129,9 @@ def transport_enabled():
 def current_clients(interfaces):
     clients = []
     for interface in interfaces:
-        raw_clients = interface["clients"]
+        raw_clients = interface.get("client_records")
         if isinstance(raw_clients, dict): raw_clients = raw_clients.values()
-        if not isinstance(raw_clients, (list, tuple)) and not hasattr(raw_clients, "__iter__"): continue
+        if not isinstance(raw_clients, (list, tuple)): continue
         for raw in raw_clients:
             if not isinstance(raw, dict): continue
             ip = values(raw, "remote_ip", "ip", "address", "host")
@@ -174,9 +141,9 @@ def current_clients(interfaces):
 
 def ingest_snapshot():
     snap = snapshot(); interfaces = find_interface_records(snap.get("status")) if snap.get("status") else []; clients = current_clients(interfaces)
-    state = {"interfaces": {x["name"]: x["status"] for x in interfaces}, "clients": {x["key"]: x for x in clients}, "client_counts": {x["name"]: x["client_count"] for x in interfaces if x["client_count"] is not None}, "queue_total": sum(x["queue"] or 0 for x in interfaces), "announce_total": sum(x["announces"] or 0 for x in interfaces), "path_count": len(snap.get("paths") or [])}
+    state = {"interfaces": {x["name"]: x.get("status") for x in interfaces}, "clients": {x["key"]: x for x in clients}, "client_counts": {x["name"]: x["client_count"] for x in interfaces if x.get("client_count") is not None}, "held_announce_total": sum(x.get("held_announces") or 0 for x in interfaces), "announce_total": sum(x.get("announces") or 0 for x in interfaces), "path_count": len(snap.get("paths") or [])}
     with db() as con:
-        row = con.execute("SELECT value_json FROM observer_state WHERE state_key='latest'").fetchone(); prior = json.loads(row["value_json"]) if row else {"interfaces": {}, "clients": {}, "client_counts": {}, "queue_total": 0, "announce_total": 0, "path_count": 0}
+        row = con.execute("SELECT value_json FROM observer_state WHERE state_key='latest'").fetchone(); prior = json.loads(row["value_json"]) if row else {"interfaces": {}, "clients": {}, "client_counts": {}, "held_announce_total": 0, "announce_total": 0, "path_count": 0}
         for name, status in state["interfaces"].items():
             if name not in prior["interfaces"]: con.execute("INSERT INTO events(occurred_at,kind,severity,interface_name,message) VALUES(?,?,?,?,?)", (now(), "interface_attached", "info", name, f"Interface {name} observed"))
             elif status != prior["interfaces"].get(name): con.execute("INSERT INTO events(occurred_at,kind,severity,interface_name,message) VALUES(?,?,?,?,?)", (now(), "interface_status", "warning", name, f"Interface {name} status changed to {status}"))
@@ -194,7 +161,7 @@ def ingest_snapshot():
         for key, client in prior["clients"].items():
             if key not in state["clients"]:
                 con.execute("UPDATE connections SET disconnected_at=?,status='disconnected' WHERE connection_key=? AND status='active'", (now(), key)); con.execute("INSERT INTO events(occurred_at,kind,severity,interface_name,remote_ip,message) VALUES(?,?,?,?,?,?)", (now(), "client_disconnected", "info", client.get("interface"), client.get("remote_ip"), f"Client {client.get('remote_ip')} disconnected from {client.get('interface')}"))
-        if state["queue_total"] >= 100 and state["queue_total"] > prior.get("queue_total", 0): con.execute("INSERT INTO events(occurred_at,kind,severity,message) VALUES(?,?,?,?)", (now(), "queue_warning", "warning", f"Queue depth increased to {state['queue_total']}"))
+        if state["held_announce_total"] >= 100 and state["held_announce_total"] > prior.get("held_announce_total", 0): con.execute("INSERT INTO events(occurred_at,kind,severity,message) VALUES(?,?,?,?)", (now(), "queue_warning", "warning", f"Held announces increased to {state['held_announce_total']}"))
         if state["announce_total"] - prior.get("announce_total", 0) >= 100: con.execute("INSERT INTO events(occurred_at,kind,severity,message) VALUES(?,?,?,?)", (now(), "announce_rate", "warning", f"High announce activity: {state['announce_total'] - prior['announce_total']} new announces"))
         if state["path_count"] - prior.get("path_count", 0) >= 25: con.execute("INSERT INTO events(occurred_at,kind,severity,message) VALUES(?,?,?,?)", (now(), "path_growth", "warning", f"{state['path_count'] - prior['path_count']} new paths learned"))
         con.execute("INSERT INTO observer_state(state_key,value_json,updated_at) VALUES('latest',?,?) ON CONFLICT(state_key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at", (json.dumps(state), now()))
@@ -223,7 +190,7 @@ def system_info():
         values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line)
         memory = values.get("MemTotal", "Unavailable").strip()
     except OSError: pass
-    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.1.2"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
+    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.1.3"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
