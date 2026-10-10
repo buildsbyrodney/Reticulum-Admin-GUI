@@ -12,9 +12,9 @@ PROJECT_CHECKSUM_URL="https://github.com/buildsbyrodney/Reticulum-Admin-GUI/rele
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+INSTALLER_ARG=${1:-}
 NONINTERACTIVE=${NONINTERACTIVE:-no}
-[ "${1:-}" = "--non-interactive" ] && NONINTERACTIVE=yes
-DOCKER_USE_SUDO=no
+[ "$INSTALLER_ARG" = "--non-interactive" ] && NONINTERACTIVE=yes
 
 ARCH=$(uname -m)
 case "$ARCH" in
@@ -146,8 +146,18 @@ install_compose_plugin() {
   run_root apt-get install -y docker-compose-plugin
 }
 
-docker_cmd() {
-  if [ "$DOCKER_USE_SUDO" = yes ]; then sudo docker "$@"; else docker "$@"; fi
+docker_cmd() { docker "$@"; }
+
+start_docker_group_shell() {
+  if ! command -v sg >/dev/null 2>&1; then
+    echo "Cannot start a docker-group shell because sg is unavailable. Log out and back in, then rerun ./install.sh." >&2
+    exit 1
+  fi
+  # Environment variables retain the original argument and installer settings
+  # without interpolating user-controlled paths into sg's command string.
+  export RETICULUM_ADMIN_REEXEC_ROOT="$ROOT"
+  export RETICULUM_ADMIN_REEXEC_ARG="$INSTALLER_ARG"
+  exec sg docker -c 'if ! docker info >/dev/null 2>&1; then echo "The new docker-group shell cannot access the Docker daemon. Log out and back in, then rerun ./install.sh." >&2; exit 1; fi; cd "$RETICULUM_ADMIN_REEXEC_ROOT" || exit 1; exec /bin/sh ./install.sh "$RETICULUM_ADMIN_REEXEC_ARG"'
 }
 
 configure_docker_access() {
@@ -164,21 +174,28 @@ configure_docker_access() {
   fi
   require_root
   run_root usermod -aG docker "$(id -un)"
-  echo "Group membership was changed. Log out and back in (or reboot) before Docker can be used without sudo."
 
   if [ "$NONINTERACTIVE" = yes ]; then
+    echo "Docker group added. Log out and back in (or reboot), then rerun ./install.sh."
     exit 0
   fi
-  printf '1. Exit now so I can log out/in  2. Continue using sudo for this installation [1]: '
+  echo "Docker group added."
+  echo
+  echo "1. Start a new shell with Docker access now"
+  echo "2. Exit and log back in"
+  printf 'Choose [1]: '
   read -r choice || true
   case "${choice:-1}" in
-    2) DOCKER_USE_SUDO=yes ;;
-    *) exit 0 ;;
+    1) start_docker_group_shell ;;
+    2)
+      echo "Log out and back in (or reboot), then rerun ./install.sh."
+      exit 0
+      ;;
+    *)
+      echo "Choose 1 to start a Docker-enabled shell now, or 2 to exit."
+      exit 1
+      ;;
   esac
-  docker_cmd info >/dev/null 2>&1 || {
-    echo "Docker daemon is still unavailable using sudo. Start Docker, then rerun this installer." >&2
-    exit 1
-  }
 }
 
 ensure_docker() {
@@ -232,7 +249,7 @@ if ! has_project "$ROOT"; then
   tar -xzf "$TMPDIR_INSTALL/$ARCHIVE_NAME" -C "$DEST" --strip-components=1
   echo "Reticulum Admin installed in $DEST"
   cd "$DEST"
-  exec /bin/sh "$DEST/install.sh" "${1:-}"
+  exec /bin/sh "$DEST/install.sh" "$INSTALLER_ARG"
 fi
 
 cd "$ROOT"

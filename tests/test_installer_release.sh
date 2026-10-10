@@ -49,4 +49,15 @@ grep -F "fetch_release \"\$TMPDIR_INSTALL/\$ARCHIVE_NAME\" \"\$TMPDIR_INSTALL/\$
 grep -F "tar -xzf \"\$TMPDIR_INSTALL/\$ARCHIVE_NAME\"" "$ROOT/install.sh" >/dev/null
 grep -F 'TMP=${TMPDIR:-/tmp}/$ARCHIVE_NAME' "$ROOT/install.sh" >/dev/null
 
-echo "Standalone and update release filename verification passed."
+# Docker group re-exec must use a fresh group context, verify daemon access,
+# and never fall back to an implicit sudo continuation.
+grep -F '1. Start a new shell with Docker access now' "$ROOT/install.sh" >/dev/null
+grep -F '2. Exit and log back in' "$ROOT/install.sh" >/dev/null
+grep -F "exec sg docker -c" "$ROOT/install.sh" >/dev/null
+grep -F "docker info >/dev/null 2>&1" "$ROOT/install.sh" >/dev/null
+if grep -F "Continue using sudo" "$ROOT/install.sh" >/dev/null || grep -F "DOCKER_USE_SUDO" "$ROOT/install.sh" >/dev/null; then
+  echo "Installer still contains the deprecated sudo continuation." >&2
+  exit 1
+fi
+
+echo "Installer release naming and Docker-group flow checks passed."
