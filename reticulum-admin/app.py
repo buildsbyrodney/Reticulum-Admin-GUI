@@ -362,7 +362,9 @@ def configuration():
 @login_required
 def configuration_preview():
     require_csrf(); kind=request.form.get("kind")
-    if kind == "global": change={"kind":"global","setting":request.form.get("setting"),"value":request.form.get("value") == "on"}
+    if kind == "global":
+        setting=request.form.get("setting"); raw=request.form.get("value")
+        change={"kind":"global","setting":setting,"value":raw == "on" if setting == "enable_transport" else raw}
     else:
         changes={}
         for key in ("enabled", "mode", "network_name", "passphrase", "ifac_size", "listen_ip", "listen_port", "target_host", "target_port"):
