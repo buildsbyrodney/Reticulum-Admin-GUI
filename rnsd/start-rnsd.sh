@@ -7,6 +7,7 @@ CONTROL_DIR="$CONFIG_DIR/admin-control"
 RESTART_REQUEST="$CONTROL_DIR/restart-request"
 GENERATION_FILE="$STATUS_DIR/rnsd.generation"
 RESTART_ACK="$STATUS_DIR/rnsd.restart-ack"
+OBSERVE_REQUEST="$CONTROL_DIR/observe-request"
 mkdir -p "$CONFIG_DIR" "$STATUS_DIR" "$CONTROL_DIR"
 
 GENERATION=0
@@ -18,6 +19,8 @@ PENDING_REQUEST=""
 
 /usr/local/bin/reticulum-observer "$CONFIG_DIR" &
 OBSERVER_PID=$!
+/usr/local/bin/reticulum-control-helper "$CONFIG_DIR" &
+CONTROL_PID=$!
 
 while true; do
   # rnsd creates its safe default config and persistent storage on its first run.
@@ -28,6 +31,8 @@ while true; do
   if kill -0 "$RNSD_PID" 2>/dev/null; then
     GENERATION=$((GENERATION + 1))
     printf '%s\n' "$GENERATION" > "$GENERATION_FILE"
+    # Ask the long-running observer for an immediate, generation-tagged probe.
+    : > "$OBSERVE_REQUEST"
     if [ -n "$PENDING_REQUEST" ]; then
       printf '%s\n' "$PENDING_REQUEST" > "$RESTART_ACK"
       PENDING_REQUEST=""
@@ -49,3 +54,4 @@ while true; do
 done
 
 kill "$OBSERVER_PID" 2>/dev/null || true
+kill "$CONTROL_PID" 2>/dev/null || true

@@ -1,4 +1,4 @@
-import sys
+import json, sys, tempfile
 import unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / "management-agent"))
@@ -17,10 +17,19 @@ class ManagementTests(unittest.TestCase):
         self.assertIn("--blackhole", management.command_for("blackhole", {"identity":"a"*32, "reason":"test"}))
         with self.assertRaises(ValueError): management.command_for("shell", {})
         with self.assertRaises(ValueError): management.command_for("reload", {"interface":"bad\nname"})
-    def test_failure_result(self):
-        class Fail: returncode=2; stdout=""; stderr="no shared instance"
-        result=management.run("drop_path", {"destination":"b"*32}, runner=lambda *a,**k: Fail())
-        self.assertFalse(result["ok"])
+    def test_live_commands_are_requested_from_rnsd_helper_not_run_locally(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); old=(management.REQUESTS, management.RESULTS, management.time.sleep)
+            management.REQUESTS=root/"requests"; management.RESULTS=root/"results"
+            def helper_tick(_):
+                request_path=next(management.REQUESTS.glob("*.json")); request=json.loads(request_path.read_text())
+                self.assertEqual(request["action"], "drop_path")
+                (management.RESULTS).mkdir(parents=True, exist_ok=True)
+                (management.RESULTS/f"{request['operation_id']}.json").write_text(json.dumps({"operation_id":request["operation_id"],"operation":"drop_path","ok":True,"stdout":"done","stderr":""}))
+            management.time.sleep=helper_tick
+            try: result=management.run("drop_path", {"destination":"b"*32})
+            finally: management.REQUESTS,management.RESULTS,management.time.sleep=old
+        self.assertTrue(result["ok"]); self.assertEqual(result["operation"], "drop_path")
     def test_capability_detection(self):
         caps=management.capabilities("--blackhole --unblackhole --drop-via --drop-announces --attach --detach --reload")
         self.assertTrue(caps["blackhole"]); self.assertTrue(caps["reload_interface"])

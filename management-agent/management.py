@@ -1,10 +1,18 @@
 """Allowlisted Reticulum operation builder; deliberately contains no shell API."""
+import json
+import os
 import re
-import subprocess
+import secrets
+import time
+from pathlib import Path
 
 HASH = re.compile(r"^[0-9a-fA-F]{32}$")
 NAME = re.compile(r"^[^\x00-\x1f\n\r]{1,100}$")
 ALLOWED = {"blackhole", "unblackhole", "list_blackholes", "drop_path", "drop_via", "drop_announces", "attach", "detach", "reload"}
+ROOT = Path(os.environ.get("RETICULUM_DIR", "/reticulum"))
+REQUESTS = ROOT / "admin-control" / "requests"
+RESULTS = ROOT / "admin-control" / "results"
+CONTROL_TIMEOUT = float(os.environ.get("CONTROL_OPERATION_TIMEOUT", "25"))
 
 def validate_hash(value):
     if not isinstance(value, str) or not HASH.fullmatch(value): raise ValueError("Expected a 32-character hexadecimal Reticulum hash")
@@ -43,10 +51,28 @@ def command_for(operation, payload, config="/reticulum"):
 def capabilities(help_text):
     return {"blackhole":"--blackhole" in help_text, "unblackhole":"--unblackhole" in help_text, "drop_path":"--drop" in help_text, "drop_via_transport":"--drop-via" in help_text, "drop_announces":"--drop-announces" in help_text, "attach_interface":"--attach" in help_text, "detach_interface":"--detach" in help_text, "reload_interface":"--reload" in help_text}
 
-def run(operation, payload, runner=subprocess.run):
-    command = command_for(operation, payload)
-    result = runner(command, capture_output=True, text=True, timeout=20)
-    return {"operation": operation, "ok": result.returncode == 0, "returncode": result.returncode, "stdout": result.stdout[-4000:], "stderr": result.stderr[-4000:], "command": [command[0], *command[2:]]}
+def atomic_json(path, payload):
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(temporary, path)
+
+def run(operation, payload):
+    """Send a validated request to the rnsd-side helper; never run a CLI here."""
+    command_for(operation, payload)  # validation only; the helper validates again.
+    operation_id = "OP-" + secrets.token_hex(8).upper()
+    REQUESTS.mkdir(parents=True, exist_ok=True); RESULTS.mkdir(parents=True, exist_ok=True)
+    request_path, result_path = REQUESTS / f"{operation_id}.json", RESULTS / f"{operation_id}.json"
+    atomic_json(request_path, {"operation_id": operation_id, "action": operation, "payload": payload})
+    deadline = time.monotonic() + CONTROL_TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            result_path.unlink(missing_ok=True)
+            return result
+        except FileNotFoundError: time.sleep(0.2)
+        except (OSError, json.JSONDecodeError) as error:
+            return {"operation": operation, "operation_id": operation_id, "ok": False, "error": f"Invalid rnsd control result: {error}"}
+    return {"operation": operation, "operation_id": operation_id, "ok": False, "error": "Timed out waiting for rnsd-side control helper"}
 
 def run_sequence(steps, execute):
     """Deterministic recovery policy: stop on first failed destructive action."""

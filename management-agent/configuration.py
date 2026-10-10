@@ -3,7 +3,7 @@
 This is intentionally a small line-preserving editor, not a generic file API.
 Only known settings may be changed and unknown lines/comments are retained.
 """
-import hashlib, json, os, re, subprocess, tempfile, time
+import hashlib, json, logging, os, re, tempfile, time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,12 +15,13 @@ STATUS_DIR = ROOT / "admin-status"
 GENERATION_FILE = STATUS_DIR / "rnsd.generation"
 OPERATIONS = ROOT / "admin-config-operations"
 # These values deliberately fit inside the explicit Gunicorn and HTTP budgets.
-# A Pi 3 can take a while to relaunch rnsd, but a single rnstatus probe should
-# never consume most of that wait.
+# A Pi 3 can take a while to relaunch rnsd, so observer-based health has a
+# bounded deadline and never runs an agent-local Reticulum CLI probe.
 RESTART_HEALTH_TIMEOUT = float(os.environ.get("RESTART_HEALTH_TIMEOUT", "35"))
 INTERFACE_HEALTH_TIMEOUT = float(os.environ.get("INTERFACE_HEALTH_TIMEOUT", "10"))
-RNSTATUS_PROBE_TIMEOUT = float(os.environ.get("RNSTATUS_PROBE_TIMEOUT", "3"))
 POLL_INTERVAL = float(os.environ.get("RESTART_POLL_INTERVAL", "0.75"))
+SNAPSHOT_FILE = STATUS_DIR / "snapshot.json"
+LOG = logging.getLogger("reticulum_admin.configuration")
 MODES = {"full", "point_to_point", "access_point", "roaming", "boundary", "gateway", "internal"}
 LOG_LEVELS = {str(n) for n in range(0, 8)}
 SECRET_KEYS = {"passphrase", "ifac_passphrase", "network_key"}
@@ -165,13 +166,27 @@ def rnsd_generation():
     try: return int(GENERATION_FILE.read_text(encoding="utf-8").strip())
     except (OSError, ValueError): return 0
 
-def probe_health():
-    """Run one bounded, inexpensive health probe."""
+def observer_snapshot():
     try:
-        result = subprocess.run(["rnstatus", "--config", str(ROOT), "--json"], capture_output=True, text=True, timeout=RNSTATUS_PROBE_TIMEOUT)
-        return result.returncode == 0, (result.stderr or result.stdout)[-1000:]
-    except (OSError, subprocess.TimeoutExpired) as error:
-        return False, str(error)
+        return json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError): return None
+
+def probe_health(expected_generation=None):
+    """Read a local-rnsd observer result; never invoke rnstatus in this container."""
+    snapshot = observer_snapshot()
+    if not snapshot: return False, "observer snapshot unavailable"
+    observed = snapshot.get("rnsd_generation")
+    if expected_generation is not None and not isinstance(observed, int): return False, "observer snapshot has no rnsd generation"
+    if expected_generation is not None and observed < expected_generation: return False, f"observer snapshot generation {observed} is older than expected {expected_generation}"
+    if expected_generation is not None:
+        try:
+            collected = datetime.fromisoformat(str(snapshot.get("collected_at", "")).replace("Z", "+00:00")).timestamp()
+            if collected <= GENERATION_FILE.stat().st_mtime: return False, "observer snapshot predates rnsd generation transition"
+        except (OSError, TypeError, ValueError): return False, "observer snapshot has no valid collection timestamp"
+    if snapshot.get("status_error"): return False, f"observer status error: {snapshot['status_error']}"
+    status = snapshot.get("status")
+    if not isinstance(status, (dict, list)) or not status: return False, "observer snapshot has no valid Reticulum status"
+    return True, f"observer snapshot generation {observed} healthy"
 
 def health(wait_for_restart=False, generation_before=None, operation_id=None):
     """Bounded health check; restart health never trusts an old heartbeat."""
@@ -183,13 +198,15 @@ def health(wait_for_restart=False, generation_before=None, operation_id=None):
     while time.monotonic() < deadline:
         generation = rnsd_generation()
         if generation > before:
-            ok, detail = probe_health()
+            ok, detail = probe_health(generation)
             if ok:
+                LOG.info("%s observer snapshot generation %s healthy", operation_id or "configuration", generation)
                 return True, detail, {"restart_verified": True, "generation": generation, "operation_id": operation_id}
             last = detail or "rnstatus has not responded after restart"
         else:
             last = f"Waiting for rnsd generation after {before} (currently {generation})"
         time.sleep(POLL_INTERVAL)
+    LOG.warning("%s observer snapshot unavailable or unhealthy: %s", operation_id or "configuration", last)
     return False, last, {"restart_verified": False, "generation": rnsd_generation(), "operation_id": operation_id}
 
 def write_restart_request(operation_id=None):
@@ -203,12 +220,14 @@ def write_restart_request(operation_id=None):
         os.replace(path, RESTART_REQUEST)
     finally:
         if os.path.exists(path): os.unlink(path)
+    LOG.info("%s restart requested, generation %s", operation_id or "configuration", before)
     return before
 
 def apply_runtime(change, operation_id=None):
     if change["kind"] == "interface":
-        result = subprocess.run(["rnstatus", "--config", str(ROOT), "--reload", change["name"]], capture_output=True, text=True, timeout=INTERFACE_HEALTH_TIMEOUT)
-        return result.returncode == 0, "interface_reload", (result.stderr or result.stdout)[-1000:]
+        from management import run
+        result = run("reload", {"interface": change["name"]})
+        return bool(result.get("ok")), "interface_reload", (result.get("stderr") or result.get("stdout") or result.get("error") or "")[-1000:]
     before = write_restart_request(operation_id)
     return True, "rnsd_restart", "restart requested", before
 
@@ -242,7 +261,9 @@ def apply_change(admin, reason, change, operation_id=None):
     else: ok, health_detail, verification = False, detail, {}
     if ok:
         result = {"ok": True, "snapshot": snapshot, "diff": diff, "apply_method": method, "health": health_detail, "operation_id": operation_id, **verification}
+        LOG.info("%s configuration applied successfully", operation_id)
         save_operation(operation_id, result); return result
+    LOG.warning("%s rollback started", operation_id)
     atomic_write(before); rollback = apply_runtime(change, None); rollback_applied, rollback_method, rollback_detail = rollback[:3]; rollback_before = rollback[3] if len(rollback) > 3 else None
     if rollback_applied:
         recovery = health(rollback_method == "rnsd_restart", rollback_before, operation_id)

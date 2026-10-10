@@ -9,11 +9,11 @@ SAMPLE = """# keep this comment\n[reticulum]\nenable_transport = No\nloglevel = 
 class ConfigurationTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(); root=Path(self.temp.name)
-        self.old=(cfg.CONFIG,cfg.ROOT,cfg.SNAPSHOTS,cfg.RESTART_REQUEST,cfg.STATUS_DIR,cfg.GENERATION_FILE,cfg.OPERATIONS)
-        cfg.ROOT=root; cfg.CONFIG=root/"config"; cfg.SNAPSHOTS=root/"admin-config-snapshots"; cfg.RESTART_REQUEST=root/"admin-control"/"restart-request"; cfg.STATUS_DIR=root/"admin-status"; cfg.GENERATION_FILE=cfg.STATUS_DIR/"rnsd.generation"; cfg.OPERATIONS=root/"admin-config-operations"
-        cfg.CONFIG.write_text(SAMPLE)
+        self.old=(cfg.CONFIG,cfg.ROOT,cfg.SNAPSHOTS,cfg.RESTART_REQUEST,cfg.STATUS_DIR,cfg.GENERATION_FILE,cfg.SNAPSHOT_FILE,cfg.OPERATIONS)
+        cfg.ROOT=root; cfg.CONFIG=root/"config"; cfg.SNAPSHOTS=root/"admin-config-snapshots"; cfg.RESTART_REQUEST=root/"admin-control"/"restart-request"; cfg.STATUS_DIR=root/"admin-status"; cfg.GENERATION_FILE=cfg.STATUS_DIR/"rnsd.generation"; cfg.SNAPSHOT_FILE=cfg.STATUS_DIR/"snapshot.json"; cfg.OPERATIONS=root/"admin-config-operations"
+        cfg.CONFIG.write_text(SAMPLE); cfg.STATUS_DIR.mkdir(); cfg.GENERATION_FILE.write_text("5")
     def tearDown(self):
-        cfg.CONFIG,cfg.ROOT,cfg.SNAPSHOTS,cfg.RESTART_REQUEST,cfg.STATUS_DIR,cfg.GENERATION_FILE,cfg.OPERATIONS=self.old; self.temp.cleanup()
+        cfg.CONFIG,cfg.ROOT,cfg.SNAPSHOTS,cfg.RESTART_REQUEST,cfg.STATUS_DIR,cfg.GENERATION_FILE,cfg.SNAPSHOT_FILE,cfg.OPERATIONS=self.old; self.temp.cleanup()
     def test_known_change_preserves_unknown_lines_and_redacts_secret(self):
         candidate=cfg.edit_text(SAMPLE,{"kind":"interface","name":"Public TCP","changes":{"mode":"boundary","passphrase":"new-secret"}})
         self.assertIn("custom_key = preserve",candidate); self.assertIn("# keep this comment",candidate)
@@ -48,11 +48,39 @@ class ConfigurationTests(unittest.TestCase):
             cfg.time.monotonic = lambda: clock[0]
             cfg.time.sleep = lambda seconds: clock.__setitem__(0, clock[0] + 7)
             cfg.rnsd_generation = lambda: 8 if clock[0] >= 28 else 7
-            cfg.probe_health = lambda: (True, "healthy")
+            cfg.probe_health = lambda *args: (True, "healthy")
             ok, detail, verification = cfg.health(True, 7, "CFG-20261010-051834-A1B2C3")
         finally:
             cfg.rnsd_generation, cfg.probe_health, cfg.time.monotonic, cfg.time.sleep, cfg.RESTART_HEALTH_TIMEOUT = old_generation, old_probe, old_monotonic, old_sleep, old_budget
         self.assertTrue(ok); self.assertEqual(detail, "healthy"); self.assertTrue(verification["restart_verified"]); self.assertEqual(verification["generation"], 8)
+
+    def test_health_uses_new_rnsd_observer_snapshot_not_agent_rnstatus(self):
+        old_generation, old_monotonic, old_sleep, old_budget = cfg.rnsd_generation, cfg.time.monotonic, cfg.time.sleep, cfg.RESTART_HEALTH_TIMEOUT
+        clock=[0]
+        def generation(): return 6 if clock[0] >= 2 else 5
+        def tick(_):
+            clock[0] += 1
+            # Old generation snapshot remains briefly after the new daemon starts.
+            if clock[0] == 1:
+                cfg.SNAPSHOT_FILE.write_text('{"collected_at":"2100-01-01T00:00:00+00:00","rnsd_generation":5,"status":{"name":"old"},"status_error":null}')
+            if clock[0] == 3:
+                cfg.SNAPSHOT_FILE.write_text('{"collected_at":"2100-01-01T00:00:01+00:00","rnsd_generation":6,"observer_sequence":9,"status":{"name":"new"},"status_error":null}')
+        try:
+            cfg.RESTART_HEALTH_TIMEOUT=10; cfg.rnsd_generation=generation; cfg.time.monotonic=lambda:clock[0]; cfg.time.sleep=tick
+            ok, _, verification=cfg.health(True, 5, "CFG-20261010-051834-A1B2C3")
+        finally:
+            cfg.rnsd_generation,cfg.time.monotonic,cfg.time.sleep,cfg.RESTART_HEALTH_TIMEOUT=old_generation,old_monotonic,old_sleep,old_budget
+        self.assertTrue(ok); self.assertEqual(verification["generation"],6)
+
+    def test_unhealthy_new_observer_snapshot_causes_rollback(self):
+        old_runtime, old_health=cfg.apply_runtime,cfg.health
+        responses=iter([(False,"observer status error: unavailable",{"restart_verified":False}), (True,"recovered",{"restart_verified":True})])
+        try:
+            cfg.apply_runtime=lambda change, operation_id=None:(True,"rnsd_restart","",5)
+            cfg.health=lambda *args, **kwargs:next(responses)
+            result=cfg.apply_change("admin","test",{"kind":"global","setting":"enable_transport","value":True},"CFG-20261010-051834-A1B2C3")
+        finally: cfg.apply_runtime,cfg.health=old_runtime,old_health
+        self.assertFalse(result["ok"]); self.assertTrue(result["rolled_back"]); self.assertIn("enable_transport = No",cfg.read_config())
 
     def test_operation_id_prevents_duplicate_apply(self):
         operation = "CFG-20261010-051834-A1B2C3"

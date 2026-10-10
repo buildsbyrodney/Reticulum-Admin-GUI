@@ -1,4 +1,4 @@
-import json, os, secrets, subprocess
+import json, os, secrets
 from flask import Flask, abort, jsonify, request
 from management import ALLOWED, capabilities, run
 import configuration
@@ -7,11 +7,11 @@ app = Flask(__name__); TOKEN = os.environ.get("MANAGEMENT_TOKEN", ""); CONFIG = 
 def auth():
     if not TOKEN or not secrets.compare_digest(request.headers.get("X-Management-Token", ""), TOKEN): abort(401)
 def help_text():
-    parts=[]
-    for binary in ("rnpath", "rnstatus"):
-        try: parts.append(subprocess.run([binary,"--help"],capture_output=True,text=True,timeout=5).stdout)
-        except OSError: pass
-    return "\n".join(parts)
+    try:
+        caps = json.loads((configuration.STATUS_DIR / "capabilities.json").read_text(encoding="utf-8"))
+        flags = {"--blackhole":caps.get("blackhole"), "--unblackhole":caps.get("unblackhole"), "--drop":caps.get("drop_path"), "--drop-via":caps.get("drop_via_transport"), "--drop-announces":caps.get("drop_announces"), "--attach":caps.get("attach_interface"), "--detach":caps.get("detach_interface"), "--reload":caps.get("reload_interface")}
+        return " ".join(flag for flag, enabled in flags.items() if enabled)
+    except (OSError, json.JSONDecodeError): return ""
 @app.get("/capabilities")
 def get_capabilities(): auth(); return jsonify({"capabilities":capabilities(help_text())})
 @app.post("/execute")
@@ -20,7 +20,6 @@ def execute():
     if operation not in ALLOWED: return jsonify({"ok":False,"error":"Unknown operation"}),400
     try: return jsonify(run(operation, body.get("payload") or {}))
     except ValueError as error: return jsonify({"ok":False,"error":str(error)}),400
-    except subprocess.TimeoutExpired: return jsonify({"ok":False,"error":"Reticulum utility timed out"}),504
 
 @app.get("/config")
 def config_get(): auth(); return jsonify({"ok": True, "config": configuration.public_model()})
