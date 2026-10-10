@@ -45,6 +45,7 @@ def db():
       CREATE TABLE IF NOT EXISTS labels (entity_type TEXT NOT NULL, entity_value TEXT NOT NULL, label TEXT NOT NULL, notes TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY(entity_type, entity_value));
       CREATE TABLE IF NOT EXISTS observer_state (state_key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS incidents (id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, admin TEXT NOT NULL, target_json TEXT NOT NULL, actions_json TEXT NOT NULL, preview_json TEXT NOT NULL, results_json TEXT, notes TEXT, status TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS config_changes (id INTEGER PRIMARY KEY, occurred_at INTEGER NOT NULL, admin TEXT NOT NULL, setting TEXT NOT NULL, old_value TEXT, new_value TEXT, snapshot_id TEXT, apply_method TEXT, result TEXT NOT NULL, rolled_back INTEGER NOT NULL DEFAULT 0, error TEXT);
       CREATE INDEX IF NOT EXISTS events_filter_idx ON events(occurred_at, kind, interface_name, remote_ip);
       CREATE INDEX IF NOT EXISTS connections_active_idx ON connections(connection_key, status);
     """)
@@ -179,6 +180,14 @@ def management(path, body=None):
         with urllib.request.urlopen(req, timeout=25) as response: return json.loads(response.read())
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as error: return {"ok":False,"error":str(error)}
 
+def record_config_change(result, change):
+    diff = result.get("diff") or []; setting = change.get("setting") or change.get("name") or "snapshot restore"
+    old = ", ".join(f"{x.get('section')}.{x.get('key')}={x.get('old')}" for x in diff)[:1000]
+    new = ", ".join(f"{x.get('section')}.{x.get('key')}={x.get('new')}" for x in diff)[:1000]
+    snapshot_id = (result.get("snapshot") or {}).get("id")
+    with db() as con: con.execute("INSERT INTO config_changes(occurred_at,admin,setting,old_value,new_value,snapshot_id,apply_method,result,rolled_back,error) VALUES(?,?,?,?,?,?,?,?,?,?)", (now(), session.get("admin", "admin"), setting, old, new, snapshot_id, result.get("apply_method"), "Applied" if result.get("ok") else "Rolled Back" if result.get("rolled_back") else "Failed", int(bool(result.get("rolled_back"))), result.get("error") or result.get("rollback_error")))
+    audit("config_changed" if result.get("ok") else "config_rollback", f"Configuration {setting}: {'applied' if result.get('ok') else 'rolled back' if result.get('rolled_back') else 'failed'}", "info" if result.get("ok") else "error", detail={"snapshot_id": snapshot_id, "apply_method": result.get("apply_method")})
+
 def recovery_preview(form):
     target = {"identity":form.get("identity", "").strip(), "transport":form.get("transport", "").strip(), "destination":form.get("destination", "").strip(), "interface":form.get("interface", "").strip()}
     actions = [key for key in ("blackhole","drop_via","drop_announces","attach","detach","reload") if form.get(key)]
@@ -190,7 +199,7 @@ def system_info():
         values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line)
         memory = values.get("MemTotal", "Unavailable").strip()
     except OSError: pass
-    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.1.3"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
+    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.2.0"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
@@ -342,10 +351,70 @@ def queues():
     _, interfaces, _ = ingest_snapshot()
     return render_template("queues.html", title="Queues", rows=interfaces)
 
+@app.get("/configuration")
+@login_required
+def configuration():
+    result = management("/config")
+    with db() as con: changes=con.execute("SELECT * FROM config_changes ORDER BY occurred_at DESC LIMIT 50").fetchall()
+    return render_template("configuration.html", title="Configuration", config=result.get("config", {}), error=result.get("error"), changes=changes)
+
+@app.post("/configuration/preview")
+@login_required
+def configuration_preview():
+    require_csrf(); kind=request.form.get("kind")
+    if kind == "global": change={"kind":"global","setting":request.form.get("setting"),"value":request.form.get("value") == "on"}
+    else:
+        changes={}
+        for key in ("enabled", "mode", "network_name", "passphrase", "ifac_size", "listen_ip", "listen_port", "target_host", "target_port"):
+            value=request.form.get(key)
+            if value not in (None, ""): changes[key] = (value.lower() in ("on","yes","true","1")) if key == "enabled" else (int(value) if key in ("ifac_size","listen_port","target_port") and value.isdigit() else value)
+        change={"kind":"interface","name":request.form.get("name"),"changes":changes}
+    result=management("/config/preview", {"change":change})
+    if not result.get("ok"): flash(result.get("error", "Configuration validation failed"), "error"); return redirect(url_for("configuration"))
+    session["config_change"]={"change":change,"reason":request.form.get("reason", "Configuration change")[:240]}
+    return render_template("configuration_preview.html", title="Review Configuration Change", preview=result, change=change)
+
+@app.post("/configuration/apply")
+@login_required
+def configuration_apply():
+    require_csrf(); item=session.pop("config_change", None)
+    if not item: abort(400, "No configuration change to apply")
+    result=management("/config/apply", {"admin":session["admin"],"reason":item["reason"],"change":item["change"]})
+    record_config_change(result, item["change"])
+    flash("Configuration applied." if result.get("ok") else "Configuration failed and was rolled back." if result.get("rolled_back") else "Configuration failed; recovery needs attention.", "success" if result.get("ok") else "error")
+    return redirect(url_for("configuration"))
+
+@app.route("/snapshots", methods=["GET", "POST"])
+@login_required
+def snapshots():
+    if request.method == "POST":
+        require_csrf(); result=management("/snapshots", {"admin":session["admin"],"reason":request.form.get("reason", "Manual snapshot")[:240]})
+        audit("snapshot_created", f"Manual configuration snapshot {(result.get('snapshot') or {}).get('id','')}", detail={"snapshot":result.get("snapshot")}); flash("Snapshot created." if result.get("ok") else result.get("error","Snapshot failed"), "success" if result.get("ok") else "error")
+        return redirect(url_for("snapshots"))
+    result=management("/snapshots")
+    return render_template("snapshots.html", title="Configuration Snapshots", snapshots=result.get("snapshots", []), current_hash=result.get("current_hash"), error=result.get("error"))
+
+@app.post("/snapshots/<snapshot_id>/compare")
+@login_required
+def snapshot_compare(snapshot_id):
+    require_csrf(); result=management(f"/snapshots/{snapshot_id}/compare", {})
+    return render_template("snapshot_compare.html", title="Snapshot Comparison", result=result, snapshot_id=snapshot_id)
+
+@app.post("/snapshots/<snapshot_id>/restore")
+@login_required
+def snapshot_restore(snapshot_id):
+    require_csrf()
+    if request.form.get("confirm") != "RESTORE":
+        compare=management(f"/snapshots/{snapshot_id}/compare", {})
+        return render_template("snapshot_restore_confirm.html", title="Confirm Snapshot Restore", snapshot_id=snapshot_id, result=compare)
+    result=management(f"/snapshots/{snapshot_id}/restore", {"admin":session["admin"],"reason":"Manual snapshot restore"})
+    record_config_change(result, {"setting":f"restore snapshot {snapshot_id}"}); flash("Snapshot restored." if result.get("ok") else "Restore failed; safety rollback attempted.", "success" if result.get("ok") else "error")
+    return redirect(url_for("snapshots"))
+
 @app.get("/<page>")
 @login_required
 def read_only_page(page):
-    if page not in ("configuration",): abort(404)
+    if page not in (): abort(404)
     return render_template("read_only.html", title=page.title(), text="This is intentionally read-only. The dashboard and Interfaces views show metrics when rnstatus exposes them; no control operations are enabled.", raw=None)
 
 def collector():

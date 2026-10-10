@@ -24,7 +24,7 @@ The installer is a normal file you can inspect before execution. It downloads a 
 
 The installer checks Docker and Compose, asks for a port (default `8740`), access mode (`local` is the default), and timezone (default `America/Chicago`). On Debian, Ubuntu, Raspberry Pi OS, and other Debian-derived systems, it offers to install missing Docker Engine and Compose v2 from Docker's official APT repository. The default interactive answer is Yes; non-interactive use requires `INSTALL_DOCKER=yes`. It checks an occupied port when `ss` is available, creates a restricted `.env`, generates a random `ADMIN_SECRET_KEY`, then builds and starts the services. It preserves an existing `.env` unless you explicitly choose to replace it.
 
-If Docker is installed but the current account cannot reach its daemon, the installer offers to add that account to the `docker` group. New group membership only takes effect after logging out and back in (or rebooting). You can exit at that point or explicitly continue the current installation with `sudo`; the installer never assumes the new group membership is already active.
+If Docker is installed but the current account cannot reach its daemon, the installer offers to add that account to the `docker` group. It can start a new `docker`-group shell and resume the installer after verifying daemon access, or exit so you can log out and back in.
 
 ## Single-file installer workflow
 
@@ -85,6 +85,22 @@ Reticulum identities and destination hashes are not inherently TCP source IP add
 Incident Recovery is explicit dynamic-state cleanup, not an automatic ban system. It provides a review step before applying selected actions: blackhole an identity (optionally for a duration and with a reason), drop one path, drop all paths via a transport identity, clear all queued announces, and attach/detach/reload a named interface when the installed Reticulum version supports the relevant command.
 
 Blackholing affects this operator's own Reticulum network segments; it does not globally ban an identity. Dropping paths removes currently learned route state, but routes can be learned again if they continue to be announced. **Drop queued announces is broad local queue cleanup**, not peer-selective, and requires typing `DROP ANNOUNCES`. Detaching an interface requires typing `DETACH`. Recovery steps execute in a deterministic displayed order and stop at the first failure; the durable incident record is marked Completed, Partially completed, or Failed.
+
+## Safe Configuration Changes and Snapshots
+
+Configuration writes are performed only by the internal management agent. The web container retains a read-only Reticulum mount and has no Docker socket or file-write endpoint. Supported changes are deliberately structured: Transport Mode, interface enabled state, interface mode, IFAC network name/passphrase/size, and TCP server/client endpoint fields. Every change follows review diff → automatic snapshot → candidate validation → atomic write → interface reload or internal rnsd restart → health check. A failed health check restores the previous configuration and records the rollback.
+
+Snapshots include the Reticulum configuration plus redacted metadata and are stored in persistent Reticulum state. They restore configuration settings, not learned paths, announces, queues, or other dynamic routing state. Snapshot diffs never display IFAC passphrases; passphrase changes appear only as `Changed`. Unknown configuration lines, custom sections, and comments are preserved when supported keys are edited. The first write also creates `config.original` and never overwrites it.
+
+### Physical Pi validation checklist for configuration
+
+1. Create a manual snapshot with a note.
+2. Toggle Transport Mode ON, confirm the management-agent health result, then toggle it OFF.
+3. Disable AutoInterface and confirm its runtime state changes; re-enable it.
+4. Change one safe interface setting and verify interface reload behavior.
+5. Compare and restore a previous snapshot; inspect Timeline and Change History.
+6. In controlled test mode only, submit an invalid candidate and confirm rollback without touching production settings.
+7. Reboot the Pi and verify persistent configuration and snapshots remain available.
 
 ## Management-agent boundary
 
