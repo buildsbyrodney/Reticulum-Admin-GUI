@@ -30,6 +30,10 @@ class LiveRnstatusTests(unittest.TestCase):
         (status_dir / "rnsd.heartbeat").write_text("0", encoding="utf-8")
         with cls.app_module.db() as con:
             con.execute("INSERT INTO admins VALUES (?, ?, ?)", ("admin", "hash", 0))
+        cls.app_module.CONFIG_VIEW_CACHE["config"] = {
+            "global": {"enable_transport": "No", "loglevel": "4"},
+            "interfaces": [{"name": "Default Interface", "type": "AutoInterface", "enabled": "Yes", "mode": "full", "fields": {}}],
+        }
 
     @classmethod
     def tearDownClass(cls):
@@ -41,6 +45,12 @@ class LiveRnstatusTests(unittest.TestCase):
             session["admin"] = "admin"
             session["csrf"] = "test-csrf"
         return client
+
+    def setUp(self):
+        self.app_module.CONFIG_VIEW_CACHE["config"] = {
+            "global": {"enable_transport": "No", "loglevel": "4"},
+            "interfaces": [{"name": "Default Interface", "type": "AutoInterface", "enabled": "Yes", "mode": "full", "fields": {}}],
+        }
 
     def test_adapter_normalizes_real_pi_fields(self):
         records = self.app_module.find_interface_records(json.loads(FIXTURE.read_text()))
@@ -70,12 +80,37 @@ class LiveRnstatusTests(unittest.TestCase):
             response = client.get(route)
             self.assertEqual(response.status_code, 200, route)
         page = client.get("/interfaces").get_data(as_text=True)
-        self.assertIn("Shared Instance[rns/default]", page)
+        self.assertIn("Runtime / System Interfaces", page)
+        self.assertIn("System Managed", page)
         self.assertIn("0 B / 0 B", page)
         self.assertIn(">1</td>", page)
         self.assertIn("Full", page)
         self.assertIn("Up", page)
-        self.assertIn("AutoInterface[Default Interface]", page)
+        self.assertIn("Default Interface", page)
+        self.assertEqual(page.count("AutoInterface[Default Interface]"), 0)
+
+    def test_configured_interface_is_merged_and_system_interfaces_are_read_only(self):
+        client = self.client()
+        page = client.get("/interfaces").get_data(as_text=True)
+        self.assertEqual(page.count("Default Interface</td>"), 1)
+        self.assertIn("/interfaces/Default%20Interface/edit", page)
+        self.assertNotIn("/interfaces/Shared%20Instance%5Brns/default%5D/edit", page)
+        self.assertNotIn("/interfaces/LocalClientInterface%5Btest-client%5D/clone", page)
+
+        edit = client.get("/interfaces/Default%20Interface/edit")
+        self.assertEqual(edit.status_code, 200)
+        self.assertIn(b"Edit Interface", edit.data)
+        self.assertIn(b"Default Interface", edit.data)
+
+        blocked_edit = client.get("/interfaces/LocalClientInterface%5Btest-client%5D/edit", follow_redirects=True)
+        self.assertEqual(blocked_edit.status_code, 200)
+        self.assertIn(b"managed internally by Reticulum", blocked_edit.data)
+        blocked_clone = client.get("/interfaces/LocalClientInterface%5Btest-client%5D/clone", follow_redirects=True)
+        self.assertEqual(blocked_clone.status_code, 200)
+        self.assertIn(b"managed internally by Reticulum", blocked_clone.data)
+        blocked_delete = client.post("/interfaces/LocalClientInterface%5Btest-client%5D/delete", data={"csrf_token": "test-csrf"}, follow_redirects=True)
+        self.assertEqual(blocked_delete.status_code, 200)
+        self.assertIn(b"managed internally by Reticulum", blocked_delete.data)
 
     def test_configuration_agent_timeout_is_recorded_not_http_500(self):
         client = self.client()

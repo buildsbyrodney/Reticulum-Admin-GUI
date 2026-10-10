@@ -73,7 +73,7 @@ def csrf_token():
 
 @app.context_processor
 def common_values():
-    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.1")}
+    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.2")}
 
 def require_csrf():
     if not secrets.compare_digest(session.get("csrf", ""), request.form.get("csrf_token", "")): abort(400, "Invalid form token")
@@ -120,6 +120,68 @@ def config_interfaces():
         elif "ifac" in key.lower(): current["ifac_enabled"] = True
     if current: records.append(current)
     return records
+
+
+# A Reticulum process exposes several runtime interfaces which are not config
+# sections an operator created. Keep this classification in one place so a
+# template can never accidentally offer destructive actions for plumbing.
+SYSTEM_RUNTIME_TYPES = {"LocalServerInterface", "LocalClientInterface"}
+
+def _bracketed_interface_name(name):
+    match = re.match(r"^[^\[]+\[(.+)\]$", str(name or ""))
+    return match.group(1) if match else None
+
+def _runtime_matches_configured(configured, runtime):
+    """Match only stable Reticulum naming forms; never fuzzy-match interfaces."""
+    configured_name = str(configured.get("name") or "")
+    runtime_type = runtime.get("type")
+    configured_type = configured.get("type")
+    if configured_type and runtime_type and configured_type != runtime_type:
+        return False
+    candidates = (
+        runtime.get("short_name"),
+        runtime.get("name"),
+        _bracketed_interface_name(runtime.get("name")),
+    )
+    return configured_name in {str(candidate) for candidate in candidates if candidate}
+
+def merge_interface_models(configured, observed):
+    """Create one explicit presentation model per configured or runtime interface."""
+    remaining = list(observed or [])
+    configured_rows = []
+    for configured_item in configured or []:
+        runtime = next((item for item in remaining if _runtime_matches_configured(configured_item, item)), None)
+        if runtime:
+            remaining.remove(runtime)
+        row = dict(runtime or {})
+        row.update({"name": configured_item.get("name"), "short_name": configured_item.get("name"),
+                    "type": configured_item.get("type") or row.get("type"),
+                    "mode": configured_item.get("mode") or row.get("mode"),
+                    "fields": configured_item.get("fields") or {},
+                    "configured": True, "runtime_only": False, "system_internal": False,
+                    "editable": True, "cloneable": True, "deletable": True,
+                    "configured_enabled": configured_item.get("enabled"),
+                    "configured_mode": configured_item.get("mode"),
+                    "configured_fields": configured_item.get("fields") or {},
+                    "configured_ifac": bool((configured_item.get("fields") or {}).get("passphrase") or configured_item.get("ifac_enabled"))})
+        configured_rows.append(row)
+    runtime_rows = []
+    for runtime in remaining:
+        row = dict(runtime)
+        internal = row.get("type") in SYSTEM_RUNTIME_TYPES
+        row.update({"configured": False, "runtime_only": True, "system_internal": internal,
+                    "editable": False, "cloneable": False, "deletable": False,
+                    "configured_enabled": None, "configured_mode": None,
+                    "configured_fields": {}, "configured_ifac": None})
+        runtime_rows.append(row)
+    return configured_rows, runtime_rows
+
+def configured_interface(name):
+    return next((item for item in configuration_model().get("interfaces", []) if item.get("name") == name), None)
+
+def is_user_configurable_interface(name):
+    """Return a persistent config entry, or None for Reticulum runtime objects."""
+    return configured_interface(name)
 
 def transport_enabled():
     try: contents = (RETICULUM_DIR / "config").read_text(encoding="utf-8", errors="replace")
@@ -318,7 +380,7 @@ def system_info():
         values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line)
         memory = values.get("MemTotal", "Unavailable").strip()
     except OSError: pass
-    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.1"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
+    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.2"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
@@ -357,11 +419,44 @@ def dashboard():
 @app.get("/interfaces")
 @login_required
 def interfaces():
-    snap, observed, _ = ingest_snapshot(); by_name = {x["name"]: x for x in observed}; rows = []
-    for item in config_interfaces(): rows.append({**item, **{k:v for k,v in by_name.get(item["name"], {}).items() if v is not None}})
-    for name, item in by_name.items():
-        if not any(row["name"] == name for row in rows): rows.append(item)
-    return render_template("interfaces.html", title="Interfaces", rows=rows, error=snap.get("status_error"))
+    snap, observed, _ = ingest_snapshot()
+    configured_rows, runtime_rows = merge_interface_models(configuration_model().get("interfaces", []), observed)
+    return render_template("interfaces.html", title="Interfaces", configured_rows=configured_rows,
+                           runtime_rows=runtime_rows, error=snap.get("status_error"))
+
+@app.get("/interfaces/<name>")
+@login_required
+def interface_detail(name):
+    _, observed, _ = ingest_snapshot()
+    configured_rows, runtime_rows = merge_interface_models(configuration_model().get("interfaces", []), observed)
+    row = next((item for item in configured_rows + runtime_rows if item.get("name") == name), None)
+    if not row:
+        abort(404)
+    return render_template("interface_detail.html", title=f"Interface: {name}", interface=row)
+
+@app.route("/interfaces/<name>/edit", methods=["GET", "POST"])
+@login_required
+def interface_edit(name):
+    source = is_user_configurable_interface(name)
+    if not source:
+        flash("This interface is managed internally by Reticulum and does not have a persistent configuration entry to edit.", "error")
+        return redirect(url_for("interfaces"))
+    _, observed, _ = ingest_snapshot()
+    configured_rows, _ = merge_interface_models(configuration_model().get("interfaces", []), observed)
+    row = next((item for item in configured_rows if item.get("name") == name), {})
+    if request.method == "POST":
+        require_csrf()
+        changes = {}
+        for key in ("enabled", "mode", "network_name", "passphrase", "ifac_size", "listen_ip", "listen_port", "target_host", "target_port"):
+            value = request.form.get(key)
+            if value not in (None, ""):
+                changes[key] = (value.lower() in ("on", "yes", "true", "1")) if key == "enabled" else (int(value) if key in ("ifac_size", "listen_port", "target_port") and value.isdigit() else value)
+        change = {"kind": "interface", "name": name, "changes": changes}
+        result = local_config_preview(change)
+        operation_id = f"CFG-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(3).upper()}"
+        session["config_change"] = {"change": change, "reason": request.form.get("reason", f"Update {name}")[:240], "operation_id": operation_id}
+        return render_template("configuration_preview.html", title="Review Interface Change", preview=result, change=change)
+    return render_template("interface_edit.html", title=f"Edit Interface: {name}", interface=row, modes=MODE_HELP)
 
 @app.route("/interfaces/add", methods=["GET", "POST"])
 @login_required
@@ -380,8 +475,10 @@ def interface_add():
 @app.route("/interfaces/<name>/clone", methods=["GET", "POST"])
 @login_required
 def interface_clone(name):
-    source = next((item for item in configuration_model().get("interfaces", []) if item.get("name") == name), None)
-    if not source: abort(404)
+    source = is_user_configurable_interface(name)
+    if not source:
+        flash("This interface is managed internally by Reticulum and does not have a persistent configuration entry to clone.", "error")
+        return redirect(url_for("interfaces"))
     if request.method == "POST":
         require_csrf()
         try:
@@ -398,8 +495,10 @@ def interface_clone(name):
 @login_required
 def interface_delete(name):
     require_csrf()
-    if not any(item.get("name") == name for item in configuration_model().get("interfaces", [])): abort(404)
-    _, observed, _ = ingest_snapshot(); active = next((item for item in observed if item.get("name") == name), {})
+    if not is_user_configurable_interface(name):
+        flash("This interface is managed internally by Reticulum and does not have a persistent configuration entry to delete.", "error")
+        return redirect(url_for("interfaces"))
+    _, observed, _ = ingest_snapshot(); configured_rows, _ = merge_interface_models(configuration_model().get("interfaces", []), observed); active = next((item for item in configured_rows if item.get("name") == name), {})
     warning = "This interface currently has active clients or peers." if (active.get("client_count") or active.get("peer_count")) else "Deleting an interface removes its persistent configuration. A snapshot will be created first."
     try: preview, _ = preview_provision_change({"kind":"interface_delete", "name":name}, f"Delete {name}", warning)
     except ValueError as error: flash(str(error), "error"); return redirect(url_for("interfaces"))
@@ -408,9 +507,7 @@ def interface_delete(name):
 @app.get("/topology")
 @login_required
 def topology():
-    _, observed, _ = ingest_snapshot(); live = {item.get("name"):item for item in observed}; rows=[]
-    for configured in configuration_model().get("interfaces", []):
-        merged=dict(configured); merged.update({key:value for key,value in live.get(configured.get("name"), {}).items() if value is not None}); rows.append(merged)
+    _, observed, _ = ingest_snapshot(); rows, _ = merge_interface_models(configuration_model().get("interfaces", []), observed)
     warnings=[]; modes={str(item.get("mode", "")).lower() for item in rows}
     if "full" in modes and "internal" in modes: warnings.append("A Full interface and an Internal interface are both configured. Review announce propagation for this topology.")
     if transport_enabled() and any(item.get("type") == "TCPServerInterface" and str(item.get("mode", "")).lower() == "full" for item in rows): warnings.append("Transport Mode is enabled while a Full TCP Server interface is configured. Confirm this node is intended to route for other peers.")
