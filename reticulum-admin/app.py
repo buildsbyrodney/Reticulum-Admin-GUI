@@ -175,14 +175,14 @@ def ingest_snapshot():
 def labels():
     with db() as con: return {(x["entity_type"], x["entity_value"]): dict(x) for x in con.execute("SELECT * FROM labels")}
 
-def management(path, body=None):
+def management(path, body=None, timeout=None):
     token = os.environ.get("MANAGEMENT_TOKEN", ""); base = os.environ.get("MANAGEMENT_URL", "")
     if not token or not base: return {"ok": False, "error": "Management agent is not configured"}
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base+path, data=data, headers={"X-Management-Token":token, "Content-Type":"application/json"})
     try:
-        timeout = float(os.environ.get("MANAGEMENT_HTTP_TIMEOUT", "100"))
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        request_timeout = float(os.environ.get("MANAGEMENT_HTTP_TIMEOUT", "100")) if timeout is None else timeout
+        with urllib.request.urlopen(req, timeout=request_timeout) as response:
             payload = json.loads(response.read())
             if not isinstance(payload, dict): raise ValueError("Management response is not an object")
             return payload
@@ -368,7 +368,7 @@ def queues():
 @app.get("/configuration")
 @login_required
 def configuration():
-    result = management("/config")
+    result = management("/config", timeout=float(os.environ.get("MANAGEMENT_PREVIEW_TIMEOUT", "5")))
     with db() as con: changes=con.execute("SELECT * FROM config_changes ORDER BY occurred_at DESC LIMIT 50").fetchall()
     return render_template("configuration.html", title="Configuration", config=result.get("config", {}), error=result.get("error"), changes=changes)
 
@@ -385,8 +385,10 @@ def configuration_preview():
             value=request.form.get(key)
             if value not in (None, ""): changes[key] = (value.lower() in ("on","yes","true","1")) if key == "enabled" else (int(value) if key in ("ifac_size","listen_port","target_port") and value.isdigit() else value)
         change={"kind":"interface","name":request.form.get("name"),"changes":changes}
-    result=management("/config/preview", {"change":change})
-    if not result.get("ok"): flash(result.get("error", "Configuration validation failed"), "error"); return redirect(url_for("configuration"))
+    result=management("/config/preview", {"change":change}, timeout=float(os.environ.get("MANAGEMENT_PREVIEW_TIMEOUT", "5")))
+    if not result.get("ok"):
+        message = "Configuration preview is temporarily unavailable; no change was applied." if result.get("unknown") else result.get("error", "Configuration validation failed")
+        flash(message, "error"); return redirect(url_for("configuration"))
     operation_id = f"CFG-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(3).upper()}"
     session["config_change"]={"change":change,"reason":request.form.get("reason", "Configuration change")[:240], "operation_id":operation_id}
     return render_template("configuration_preview.html", title="Review Configuration Change", preview=result, change=change)
