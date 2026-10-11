@@ -92,7 +92,8 @@ def validate_change(change, text=None):
             if key not in allowed: raise ValueError("Unsupported interface setting")
             if key == "enabled" and not isinstance(value, bool): raise ValueError("enabled must be boolean")
             if key == "mode" and str(value).lower() not in MODES: raise ValueError("Unsupported interface mode")
-            if key in ("listen_port", "target_port") and (not isinstance(value, int) or not 1 <= value <= 65535): raise ValueError("Port must be between 1 and 65535")
+            if key == "listen_port" and (not isinstance(value, int) or not 1 <= value <= 65535): raise ValueError("Listen Port must be between 1 and 65535.")
+            if key == "target_port" and (not isinstance(value, int) or not 1 <= value <= 65535): raise ValueError("Target Port must be between 1 and 65535.")
             if key in ("listen_ip", "target_host", "network_name", "passphrase", "port") and (not isinstance(value, str) or not value.strip() or len(value) > 255 or any(ord(c) < 32 for c in value)): raise ValueError("Invalid text value")
             if key == "ifac_size" and (not isinstance(value, int) or value < 1 or value > 512): raise ValueError("Invalid IFAC size")
         return
@@ -124,14 +125,14 @@ def validate_interface_definition(interface, text):
     validate_change({"kind":"interface", "name":"candidate", "changes":fields}, synthetic)
     if interface_type == "TCPServerInterface":
         port = fields.get("listen_port")
-        if not isinstance(port, int): raise ValueError("Listen port is required")
+        if not isinstance(port, int): raise ValueError("Listen Port must be between 1 and 65535.")
         address = fields.get("listen_ip", "0.0.0.0")
         for section in sections.values():
             if section.get("kind") != "interface" or section["settings"].get("type") != "TCPServerInterface": continue
             old = section["settings"]
             if str(old.get("listen_port", "")) == str(port) and old.get("listen_ip", "0.0.0.0") == address:
                 raise ValueError(f"TCP server {address}:{port} is already configured by interface {section['name']}")
-    if interface_type == "TCPClientInterface" and not fields.get("target_host"): raise ValueError("Target host is required")
+    if interface_type == "TCPClientInterface" and not fields.get("target_host"): raise ValueError("Target Host must be the hostname or IP address of the remote Reticulum TCP server.")
 
 def section_ranges(text):
     lines, ranges, current, start = text.splitlines(keepends=True), {}, None, None

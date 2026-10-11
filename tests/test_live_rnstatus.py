@@ -114,6 +114,19 @@ class LiveRnstatusTests(unittest.TestCase):
         self.assertEqual(blocked_delete.status_code, 200)
         self.assertIn(b"managed internally by Reticulum", blocked_delete.data)
 
+    def test_tcp_and_tailscale_guidance_is_visible_without_network_automation(self):
+        client = self.client()
+        form = client.get("/interfaces/add?purpose=user_tcp").get_data(as_text=True)
+        self.assertIn("Listen IP", form)
+        self.assertIn("Do not normally enter your public Internet IP here", form)
+        self.assertIn("Target Port", form)
+        self.assertIn("must match that server’s Listen Port", form)
+        help_page = client.get("/help").get_data(as_text=True)
+        self.assertIn("Using Tailscale", help_page)
+        self.assertIn("Public User TCP      0.0.0.0:4242", help_page)
+        self.assertIn("Trusted Backbone     0.0.0.0:4243", help_page)
+        self.assertNotIn("Cloudflare", form + help_page)
+
     def test_configuration_agent_timeout_is_recorded_not_http_500(self):
         client = self.client()
         original = self.app_module.management
