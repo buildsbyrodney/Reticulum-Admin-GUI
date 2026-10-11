@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 APP_DIR = ROOT / "reticulum-admin"
 FIXTURE = ROOT / "tests" / "fixtures" / "rnstatus-1.5.7-pi.json"
+TCP_CHILD_FIXTURE = ROOT / "tests" / "fixtures" / "rnstatus-1.5.7-tcp-child.json"
 
 
 class LiveRnstatusTests(unittest.TestCase):
@@ -240,6 +241,69 @@ class LiveRnstatusTests(unittest.TestCase):
             row = con.execute("SELECT result, operation_id FROM config_changes ORDER BY id DESC LIMIT 1").fetchone()
         self.assertEqual(row["result"], "Result Unknown / Verification Timed Out")
         self.assertEqual(row["operation_id"], "CFG-20261010-051834-A1B2C3")
+
+    def test_runtime_tcp_child_becomes_connected_client_and_history(self):
+        """rns 1.5.7 exposes inbound peers as child interfaces, not clients[]."""
+        status = json.loads(TCP_CHILD_FIXTURE.read_text())
+        self.app_module.CONFIG_VIEW_CACHE["config"] = {"global": {}, "interfaces": [{"name": "VM Access", "type": "TCPServerInterface", "enabled": "Yes", "mode": "full", "fields": {}}]}
+        (self.app_module.RETICULUM_DIR / "config").write_text("[interfaces]\n[[VM Access]]\ntype = TCPServerInterface\nenabled = Yes\n", encoding="utf-8")
+        status_file = self.app_module.RETICULUM_DIR / "admin-status" / "snapshot.json"
+        status_file.write_text(json.dumps({"status": status, "paths": []}), encoding="utf-8")
+        with self.app_module.db() as con:
+            con.execute("DELETE FROM connections"); con.execute("DELETE FROM events"); con.execute("DELETE FROM observer_state")
+
+        _, records, active = self.app_module.ingest_snapshot()
+        self.assertEqual(len(active), 1)
+        client_record = active[0]
+        self.assertEqual(client_record["remote_ip"], "192.168.1.145")
+        self.assertEqual(client_record["remote_port"], 57032)
+        self.assertEqual(client_record["interface"], "VM Access")
+        self.assertEqual(client_record["rx"], 1039)
+        self.assertEqual(client_record["tx"], 1804)
+        self.assertEqual(client_record["ifac_netname"], "Local Access")
+        self.assertTrue(client_record["ifac_active"])
+        self.assertEqual(client_record["correlation"], "unknown")
+        self.assertNotIn("Configured Upstream", [item["interface"] for item in active])
+
+        page = self.client().get("/clients").get_data(as_text=True)
+        self.assertIn("192.168.1.145:57032", page)
+        self.assertIn("VM Access", page)
+        self.assertIn("Local Access", page)
+        self.assertIn("Reticulum Identity", page)
+        self.assertIn("Not correlated", page)
+        self.assertNotIn("signature-not-displayed", page)
+        runtime_page = self.client().get("/interfaces").get_data(as_text=True)
+        self.assertIn("Connected TCP peer · see Connected Clients", runtime_page)
+        edit_page = self.client().get("/interfaces/VM%20Access/edit").get_data(as_text=True)
+        self.assertIn("View Connected Clients", edit_page)
+
+        # Two runtime children under the one server are distinct client records.
+        second = dict(status["interfaces"][1]); second.update({"name": "TCPInterface[Client on VM Access/192.168.1.146:57033]", "hash": "second-child-hash", "rxb": 7, "txb": 8})
+        two = {"interfaces": [dict(status["interfaces"][0], clients=2), status["interfaces"][1], second, status["interfaces"][2]]}
+        self.assertEqual(len(self.app_module.current_clients(self.app_module.find_interface_records(two), self.app_module.config_interfaces())), 2)
+
+        # Losing the runtime child closes exactly one active connection and
+        # records one disconnect event; a later poll does not repeat it.
+        status_file.write_text(json.dumps({"status": {"interfaces": [status["interfaces"][0]]}, "paths": []}), encoding="utf-8")
+        self.app_module.ingest_snapshot(); self.app_module.ingest_snapshot()
+        with self.app_module.db() as con:
+            history = con.execute("SELECT * FROM connections").fetchall()
+            disconnects = con.execute("SELECT * FROM events WHERE kind='client_disconnected'").fetchall()
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["status"], "disconnected")
+        self.assertIsNotNone(history[0]["disconnected_at"])
+        self.assertEqual(len(disconnects), 1)
+
+    def test_reported_tcp_client_count_without_runtime_detail_is_explained(self):
+        self.app_module.CONFIG_VIEW_CACHE["config"] = {"global": {}, "interfaces": [{"name": "VM Access", "type": "TCPServerInterface", "enabled": "Yes", "mode": "full", "fields": {}}]}
+        (self.app_module.RETICULUM_DIR / "config").write_text("[interfaces]\n[[VM Access]]\ntype = TCPServerInterface\n", encoding="utf-8")
+        server = json.loads(TCP_CHILD_FIXTURE.read_text())["interfaces"][0]
+        (self.app_module.RETICULUM_DIR / "admin-status" / "snapshot.json").write_text(json.dumps({"status": {"interfaces": [server]}, "paths": []}), encoding="utf-8")
+        with self.app_module.db() as con: con.execute("DELETE FROM observer_state")
+        page = self.client().get("/clients").get_data(as_text=True)
+        self.assertIn("Reported clients: 1", page)
+        self.assertIn("Identified TCP peers: 0", page)
+        self.assertIn("does not expose enough per-client detail", page)
 
 
 if __name__ == "__main__":

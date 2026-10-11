@@ -1,0 +1,35 @@
+{
+  "interfaces": [
+    {
+      "clients": 1,
+      "name": "TCPServerInterface[VM Access/192.168.1.85:4243]",
+      "short_name": "VM Access",
+      "hash": "aa8ce13f55915775ff6ba9fc9211fcb8dda75d79b3645d7a622190e46789489f",
+      "type": "TCPServerInterface",
+      "status": true
+    },
+    {
+      "clients": null,
+      "parent_interface_name": "TCPServerInterface[VM Access/192.168.1.85:4243]",
+      "parent_interface_hash": "aa8ce13f55915775ff6ba9fc9211fcb8dda75d79b3645d7a622190e46789489f",
+      "name": "TCPInterface[Client on VM Access/192.168.1.145:57032]",
+      "short_name": "Client on VM Access",
+      "hash": "5681e0e4c3afd9af647cd6ff6a6929e99df5a4c48f45fbc9a2b31efe11e42184",
+      "type": "TCPClientInterface",
+      "rxb": 1039,
+      "txb": 1804,
+      "ifac_netname": "Local Access",
+      "ifac_signature": "signature-not-displayed",
+      "status": true
+    },
+    {
+      "name": "TCPClientInterface[Configured Upstream]",
+      "short_name": "Configured Upstream",
+      "hash": "outbound-client-hash",
+      "type": "TCPClientInterface",
+      "rxb": 51,
+      "txb": 52,
+      "status": true
+    }
+  ]
+}

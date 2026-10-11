@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Flask, abort, flash, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
-from reticulum_adapter import as_int, find_interface_records, values
+from reticulum_adapter import find_interface_records, inbound_tcp_child_records
 
 APP_DATA = Path(os.environ.get("APP_DATA", "/var/lib/reticulum-admin"))
 DB_PATH = APP_DATA / "admin.db"
@@ -43,7 +43,7 @@ def db():
     con.executescript("""
       CREATE TABLE IF NOT EXISTS admins (username TEXT PRIMARY KEY, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, occurred_at INTEGER NOT NULL, kind TEXT NOT NULL, severity TEXT NOT NULL DEFAULT 'info', interface_name TEXT, remote_ip TEXT, message TEXT NOT NULL, detail_json TEXT);
-      CREATE TABLE IF NOT EXISTS connections (id INTEGER PRIMARY KEY, connection_key TEXT NOT NULL, started_at INTEGER NOT NULL, disconnected_at INTEGER, remote_ip TEXT, interface_name TEXT, rx_bytes INTEGER, tx_bytes INTEGER, announces INTEGER, path_requests INTEGER, correlation TEXT, status TEXT NOT NULL DEFAULT 'active');
+      CREATE TABLE IF NOT EXISTS connections (id INTEGER PRIMARY KEY, connection_key TEXT NOT NULL, started_at INTEGER NOT NULL, disconnected_at INTEGER, remote_ip TEXT, remote_port INTEGER, interface_name TEXT, parent_interface_hash TEXT, runtime_interface_hash TEXT, ifac_netname TEXT, rx_bytes INTEGER, tx_bytes INTEGER, announces INTEGER, path_requests INTEGER, correlation TEXT, status TEXT NOT NULL DEFAULT 'active');
       CREATE TABLE IF NOT EXISTS labels (entity_type TEXT NOT NULL, entity_value TEXT NOT NULL, label TEXT NOT NULL, notes TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY(entity_type, entity_value));
       CREATE TABLE IF NOT EXISTS observer_state (state_key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS incidents (id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, admin TEXT NOT NULL, target_json TEXT NOT NULL, actions_json TEXT NOT NULL, preview_json TEXT NOT NULL, results_json TEXT, notes TEXT, status TEXT NOT NULL);
@@ -55,6 +55,10 @@ def db():
     # Keep existing persistent installations compatible with the operation-ID audit trail.
     try: con.execute("ALTER TABLE config_changes ADD COLUMN operation_id TEXT")
     except sqlite3.OperationalError: pass
+    for column, definition in (("remote_port", "INTEGER"), ("parent_interface_hash", "TEXT"),
+                               ("runtime_interface_hash", "TEXT"), ("ifac_netname", "TEXT")):
+        try: con.execute(f"ALTER TABLE connections ADD COLUMN {column} {definition}")
+        except sqlite3.OperationalError: pass
     return con
 
 def format_time(value):
@@ -73,7 +77,7 @@ def csrf_token():
 
 @app.context_processor
 def common_values():
-    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.10")}
+    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.11")}
 
 def require_csrf():
     if not secrets.compare_digest(session.get("csrf", ""), request.form.get("csrf_token", "")): abort(400, "Invalid form token")
@@ -197,21 +201,39 @@ def transport_enabled():
             return line.split("=", 1)[1].strip().lower() in ("yes", "true", "1")
     return False
 
-def current_clients(interfaces):
+def configured_name_for_runtime(runtime, configured):
+    """Use the same exact configured/runtime matcher used by Interfaces."""
+    match = next((item for item in configured or [] if _runtime_matches_configured(item, runtime)), None)
+    return match.get("name") if match else runtime.get("short_name") or runtime.get("name")
+
+def current_clients(interfaces, configured=None):
+    """Build proven inbound TCP peers from rns 1.5.x runtime child records.
+
+    Reticulum's aggregate `clients` field is not an individual-client list.
+    Only a TCPClientInterface with a TCPServerInterface parent and the strict
+    inbound runtime name contributes a detailed peer here.
+    """
     clients = []
-    for interface in interfaces:
-        raw_clients = interface.get("client_records")
-        if isinstance(raw_clients, dict): raw_clients = raw_clients.values()
-        if not isinstance(raw_clients, (list, tuple)): continue
-        for raw in raw_clients:
-            if not isinstance(raw, dict): continue
-            ip = values(raw, "remote_ip", "ip", "address", "host")
-            if not ip: continue
-            clients.append({"key": f"{interface['name']}|{ip}", "remote_ip": str(ip), "interface": interface["name"], "connected_at": as_int(values(raw, "connected_at", "connected", "since")), "rx": as_int(values(raw, "rxb", "rx_bytes", "rx")), "tx": as_int(values(raw, "txb", "tx_bytes", "tx")), "announces": as_int(values(raw, "announces", "announce_count")), "path_requests": as_int(values(raw, "path_requests", "prx", "ptx")), "identity": values(raw, "identity", "identity_hash"), "destination": values(raw, "destination", "destination_hash"), "correlation": "confirmed" if values(raw, "identity", "identity_hash", "destination", "destination_hash") else None})
+    for relation in inbound_tcp_child_records(interfaces, configured):
+        child, parent, endpoint = relation["runtime"], relation["parent"], relation["endpoint"]
+        interface_name = configured_name_for_runtime(parent, configured)
+        parent_hash = parent.get("interface_hash") or child.get("parent_interface_hash") or "unknown-parent"
+        runtime_hash = child.get("interface_hash") or child.get("name")
+        key = f"{parent_hash}|{runtime_hash}|{endpoint['remote_ip']}|{endpoint['remote_port']}"
+        clients.append({
+            "key": key, "connection_key": key,
+            "remote_ip": endpoint["remote_ip"], "remote_port": endpoint["remote_port"],
+            "interface": interface_name, "parent_interface_hash": parent_hash,
+            "runtime_interface_hash": child.get("interface_hash"),
+            "status": "active", "rx": child.get("rx_bytes"), "tx": child.get("tx_bytes"),
+            "announces": child.get("announces"), "path_requests": child.get("path_requests"),
+            "ifac_netname": child.get("ifac_netname"), "ifac_active": child.get("ifac_enabled") is True,
+            "identity": None, "destination": None, "correlation": "unknown", "connected_at": None,
+        })
     return clients
 
 def ingest_snapshot():
-    snap = snapshot(); interfaces = find_interface_records(snap.get("status")) if snap.get("status") else []; clients = current_clients(interfaces)
+    snap = snapshot(); interfaces = find_interface_records(snap.get("status")) if snap.get("status") else []; clients = current_clients(interfaces, config_interfaces())
     state = {"interfaces": {x["name"]: x.get("status") for x in interfaces}, "clients": {x["key"]: x for x in clients}, "client_counts": {x["name"]: x["client_count"] for x in interfaces if x.get("client_count") is not None}, "held_announce_total": sum(x.get("held_announces") or 0 for x in interfaces), "announce_total": sum(x.get("announces") or 0 for x in interfaces), "path_count": len(snap.get("paths") or [])}
     with db() as con:
         row = con.execute("SELECT value_json FROM observer_state WHERE state_key='latest'").fetchone(); prior = json.loads(row["value_json"]) if row else {"interfaces": {}, "clients": {}, "client_counts": {}, "held_announce_total": 0, "announce_total": 0, "path_count": 0}
@@ -226,12 +248,12 @@ def ingest_snapshot():
                 con.execute("INSERT INTO events(occurred_at,kind,severity,interface_name,message) VALUES(?,?,?,?,?)", (now(), "client_count_changed", "info", name, f"TCP/client count {direction} from {old} to {count} on {name}"))
         for key, client in state["clients"].items():
             if key not in prior["clients"]:
-                con.execute("INSERT INTO connections(connection_key,started_at,remote_ip,interface_name,rx_bytes,tx_bytes,announces,path_requests,correlation,status) VALUES(?,?,?,?,?,?,?,?,?, 'active')", (key, now(), client["remote_ip"], client["interface"], client["rx"], client["tx"], client["announces"], client["path_requests"], client["correlation"]))
-                con.execute("INSERT INTO events(occurred_at,kind,severity,interface_name,remote_ip,message) VALUES(?,?,?,?,?,?)", (now(), "client_connected", "info", client["interface"], client["remote_ip"], f"Client {client['remote_ip']} connected on {client['interface']}"))
-            else: con.execute("UPDATE connections SET rx_bytes=?,tx_bytes=?,announces=?,path_requests=? WHERE connection_key=? AND status='active'", (client["rx"], client["tx"], client["announces"], client["path_requests"], key))
-        for key, client in prior["clients"].items():
+                con.execute("INSERT INTO connections(connection_key,started_at,remote_ip,remote_port,interface_name,parent_interface_hash,runtime_interface_hash,ifac_netname,rx_bytes,tx_bytes,announces,path_requests,correlation,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'active')", (key, now(), client["remote_ip"], client["remote_port"], client["interface"], client["parent_interface_hash"], client["runtime_interface_hash"], client["ifac_netname"], client["rx"], client["tx"], client["announces"], client["path_requests"], client["correlation"]))
+                con.execute("INSERT INTO events(occurred_at,kind,severity,interface_name,remote_ip,message) VALUES(?,?,?,?,?,?)", (now(), "client_connected", "info", client["interface"], client["remote_ip"], f"TCP client {client['remote_ip']}:{client['remote_port']} connected to {client['interface']}"))
+            else: con.execute("UPDATE connections SET rx_bytes=?,tx_bytes=?,announces=?,path_requests=?,ifac_netname=? WHERE connection_key=? AND status='active'", (client["rx"], client["tx"], client["announces"], client["path_requests"], client["ifac_netname"], key))
+        for key, client in prior.get("clients", {}).items():
             if key not in state["clients"]:
-                con.execute("UPDATE connections SET disconnected_at=?,status='disconnected' WHERE connection_key=? AND status='active'", (now(), key)); con.execute("INSERT INTO events(occurred_at,kind,severity,interface_name,remote_ip,message) VALUES(?,?,?,?,?,?)", (now(), "client_disconnected", "info", client.get("interface"), client.get("remote_ip"), f"Client {client.get('remote_ip')} disconnected from {client.get('interface')}"))
+                con.execute("UPDATE connections SET disconnected_at=?,status='disconnected' WHERE connection_key=? AND status='active'", (now(), key)); con.execute("INSERT INTO events(occurred_at,kind,severity,interface_name,remote_ip,message) VALUES(?,?,?,?,?,?)", (now(), "client_disconnected", "info", client.get("interface"), client.get("remote_ip"), f"TCP client {client.get('remote_ip')}:{client.get('remote_port') or '—'} disconnected from {client.get('interface')}"))
         if state["held_announce_total"] >= 100 and state["held_announce_total"] > prior.get("held_announce_total", 0): con.execute("INSERT INTO events(occurred_at,kind,severity,message) VALUES(?,?,?,?)", (now(), "queue_warning", "warning", f"Held announces increased to {state['held_announce_total']}"))
         if state["announce_total"] - prior.get("announce_total", 0) >= 100: con.execute("INSERT INTO events(occurred_at,kind,severity,message) VALUES(?,?,?,?)", (now(), "announce_rate", "warning", f"High announce activity: {state['announce_total'] - prior['announce_total']} new announces"))
         if state["path_count"] - prior.get("path_count", 0) >= 25: con.execute("INSERT INTO events(occurred_at,kind,severity,message) VALUES(?,?,?,?)", (now(), "path_growth", "warning", f"{state['path_count'] - prior['path_count']} new paths learned"))
@@ -434,7 +456,7 @@ def system_info():
         values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line)
         memory = values.get("MemTotal", "Unavailable").strip()
     except OSError: pass
-    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.10"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
+    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.11"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
@@ -583,10 +605,29 @@ def onboarding_dismiss():
 @app.get("/clients")
 @login_required
 def clients():
-    _, _, current = ingest_snapshot(); known = labels()
-    for client in current: client["label"] = known.get(("ip", client["remote_ip"]), {}).get("label")
-    with db() as con: history = con.execute("SELECT * FROM connections ORDER BY started_at DESC LIMIT 100").fetchall()
-    return render_template("clients.html", title="Connected Clients", clients=current, history=history, labels=known)
+    _, observed, current = ingest_snapshot(); known = labels(); selected_interface = request.args.get("interface", "").strip()
+    configured = config_interfaces()
+    server_summaries = []
+    for runtime in observed:
+        if runtime.get("type") != "TCPServerInterface":
+            continue
+        interface_name = configured_name_for_runtime(runtime, configured)
+        identified = sum(1 for client in current if client["interface"] == interface_name)
+        server_summaries.append({"name": interface_name, "reported": runtime.get("client_count"), "identified": identified})
+    if selected_interface:
+        current = [client for client in current if client["interface"] == selected_interface]
+        server_summaries = [row for row in server_summaries if row["name"] == selected_interface]
+    with db() as con:
+        active = {row["connection_key"]: dict(row) for row in con.execute("SELECT * FROM connections WHERE status='active'")}
+        if selected_interface:
+            history = con.execute("SELECT * FROM connections WHERE interface_name=? ORDER BY started_at DESC LIMIT 100", (selected_interface,)).fetchall()
+        else:
+            history = con.execute("SELECT * FROM connections ORDER BY started_at DESC LIMIT 100").fetchall()
+    for client in current:
+        client["label"] = known.get(("ip", client["remote_ip"]), {}).get("label")
+        client["first_observed"] = active.get(client["key"], {}).get("started_at")
+    return render_template("clients.html", title="Connected Clients", clients=current, history=history,
+                           labels=known, server_summaries=server_summaries, selected_interface=selected_interface)
 
 @app.post("/labels")
 @login_required
@@ -775,7 +816,12 @@ def collector():
             ingest_snapshot()
             if now() - last_cleanup > 21600:
                 days = max(1, int(os.environ.get("EVENT_RETENTION_DAYS", "90")))
-                with db() as con: con.execute("DELETE FROM events WHERE occurred_at < ?", (now() - days*86400,))
+                cutoff = now() - days*86400
+                with db() as con:
+                    con.execute("DELETE FROM events WHERE occurred_at < ?", (cutoff,))
+                    # Connection history is observability data, so retain it
+                    # for the same operator-controlled window as Timeline.
+                    con.execute("DELETE FROM connections WHERE status='disconnected' AND disconnected_at < ?", (cutoff,))
                 last_cleanup = now()
         except Exception: pass
         time.sleep(15)
