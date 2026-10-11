@@ -60,6 +60,29 @@ def version():
     output, _ = run("rnsd", "--version")
     return output
 
+def host_network():
+    """Capture only local Linux interface names/IPv4 addresses for safe UI validation.
+
+    With host networking, this is the actual server network namespace. The
+    management agent reads the resulting snapshot; it never needs host shell
+    access or a Docker socket to validate a TCP Server bind address.
+    """
+    output, error = run("ip", "-j", "-4", "addr", "show")
+    if output is None:
+        return {"interfaces": [], "ipv4_addresses": [], "error": error}
+    try:
+        rows = json.loads(output)
+        interfaces = []
+        addresses = []
+        for row in rows:
+            local = [item.get("local") for item in row.get("addr_info", [])
+                     if item.get("family") == "inet" and item.get("local")]
+            interfaces.append({"name": row.get("ifname"), "ipv4_addresses": local})
+            addresses.extend(local)
+        return {"interfaces": interfaces, "ipv4_addresses": sorted(set(addresses)), "error": None}
+    except (TypeError, ValueError, json.JSONDecodeError) as parse_error:
+        return {"interfaces": [], "ipv4_addresses": [], "error": str(parse_error)}
+
 
 def write_snapshot(payload):
     temporary = SNAPSHOT.with_suffix(".tmp")
@@ -98,6 +121,7 @@ def main():
             "paths": paths,
             "path_error": path_error,
             "source": "rnstatus --json --all --totals --queues --announce-stats --pr-stats",
+            "host_network": host_network(),
         })
         interval = max(5, int(os.environ.get("OBSERVER_INTERVAL", "30")))
         for _ in range(interval * 2):

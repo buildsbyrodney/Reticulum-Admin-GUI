@@ -3,7 +3,7 @@ FROM python:3.12-slim
 ARG RNS_VERSION=1.5.7
 RUN pip install --no-cache-dir "rns==${RNS_VERSION}"
 
-RUN apt-get update && apt-get install -y --no-install-recommends util-linux && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends util-linux iproute2 && rm -rf /var/lib/apt/lists/*
 
 COPY start-rnsd.sh /usr/local/bin/start-rnsd
 COPY observer.py /usr/local/bin/reticulum-observer

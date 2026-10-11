@@ -135,6 +135,20 @@ class ConfigurationTests(unittest.TestCase):
         used = {"kind":"interface_create", "interface":{"name":"Other", "type":"TCPServerInterface", "enabled":True, "mode":"full", "fields":{"listen_ip":"0.0.0.0", "listen_port":4242}}}
         with self.assertRaisesRegex(ValueError, "already configured"): cfg.edit_text(SAMPLE, used)
 
+    def test_create_rejects_known_unassigned_host_listen_address(self):
+        cfg.SNAPSHOT_FILE.write_text('{"host_network":{"ipv4_addresses":["127.0.0.1","192.168.1.85","100.64.10.30"]}}')
+        valid = {"kind":"interface_create", "interface":{"name":"LAN TCP", "type":"TCPServerInterface", "enabled":True, "mode":"full", "fields":{"listen_ip":"192.168.1.85", "listen_port":4243}}}
+        self.assertIn("listen_ip = 192.168.1.85", cfg.edit_text(SAMPLE, valid))
+        with self.assertRaisesRegex(ValueError, "not currently assigned to this server"):
+            cfg.edit_text(SAMPLE, {"kind":"interface", "name":"Public TCP", "changes":{"listen_ip":"192.168.1.99"}})
+        invalid = {"kind":"interface_create", "interface":{"name":"Missing IP", "type":"TCPServerInterface", "enabled":True, "mode":"full", "fields":{"listen_ip":"192.168.1.99", "listen_port":4243}}}
+        with self.assertRaisesRegex(ValueError, "not currently assigned to this server"):
+            cfg.edit_text(SAMPLE, invalid)
+
+    def test_host_address_validation_is_advisory_when_observer_data_is_unavailable(self):
+        candidate = {"kind":"interface_create", "interface":{"name":"Address Later", "type":"TCPServerInterface", "enabled":True, "mode":"full", "fields":{"listen_ip":"192.168.1.99", "listen_port":4243}}}
+        self.assertIn("listen_ip = 192.168.1.99", cfg.edit_text(SAMPLE, candidate))
+
     def test_delete_interface_preserves_other_sections(self):
         candidate = cfg.edit_text(SAMPLE, {"kind":"interface_delete", "name":"Public TCP"})
         self.assertNotIn("[[Public TCP]]", candidate); self.assertIn("custom_global = retain", candidate)

@@ -3,7 +3,7 @@
 This is intentionally a small line-preserving editor, not a generic file API.
 Only known settings may be changed and unknown lines/comments are retained.
 """
-import hashlib, json, logging, os, re, tempfile, time
+import hashlib, ipaddress, json, logging, os, re, tempfile, time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -95,6 +95,7 @@ def validate_change(change, text=None):
             if key == "listen_port" and (not isinstance(value, int) or not 1 <= value <= 65535): raise ValueError("Listen Port must be between 1 and 65535.")
             if key == "target_port" and (not isinstance(value, int) or not 1 <= value <= 65535): raise ValueError("Target Port must be between 1 and 65535.")
             if key in ("listen_ip", "target_host", "network_name", "passphrase", "port") and (not isinstance(value, str) or not value.strip() or len(value) > 255 or any(ord(c) < 32 for c in value)): raise ValueError("Invalid text value")
+            if key == "listen_ip": validate_host_listen_address(value)
             if key == "ifac_size" and (not isinstance(value, int) or value < 1 or value > 512): raise ValueError("Invalid IFAC size")
         return
     if kind == "interface_create":
@@ -109,6 +110,25 @@ def validate_change(change, text=None):
 
 def valid_name(name):
     return isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._:-]{0,79}", name or "") is not None
+
+def validate_host_listen_address(address):
+    """Reject only an explicit IPv4 address the rnsd-side observer disproves.
+
+    The management agent intentionally has no host network namespace. Its
+    observer snapshot is therefore the narrow, read-only source of truth for
+    host-address checks; an unavailable snapshot must not block configuration.
+    """
+    try:
+        literal_address = ipaddress.ip_address(address)
+        snapshot = json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
+        known = set((snapshot.get("host_network") or {}).get("ipv4_addresses") or [])
+        if literal_address.version == 4 and address != "0.0.0.0" and known and address not in known:
+            raise ValueError(f"{address} is not currently assigned to this server. Use 0.0.0.0, another local address, or a valid Tailscale address.")
+    except ValueError as error:
+        if str(error).startswith(f"{address} is not currently assigned"):
+            raise
+    except (OSError, json.JSONDecodeError):
+        pass
 
 def validate_interface_definition(interface, text):
     if not isinstance(interface, dict): raise ValueError("Invalid interface definition")
@@ -127,6 +147,7 @@ def validate_interface_definition(interface, text):
         port = fields.get("listen_port")
         if not isinstance(port, int): raise ValueError("Listen Port must be between 1 and 65535.")
         address = fields.get("listen_ip", "0.0.0.0")
+        validate_host_listen_address(address)
         for section in sections.values():
             if section.get("kind") != "interface" or section["settings"].get("type") != "TCPServerInterface": continue
             old = section["settings"]

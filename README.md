@@ -2,7 +2,7 @@
 
 A Docker-based web administration and observability interface for Reticulum nodes. It provides a managed `rnsd` deployment, Dashboard, Interfaces, Paths, Announces, Queues, Logs, Timeline, labels, Blackholes, Incident Recovery, and a narrow internal management agent. Connected-client detail appears only where Reticulum exposes reliable data.
 
-**Supported by design:** Linux with Docker Engine and Docker Compose v2 on `x86_64`, `aarch64`, and `arm64`. Primary target distributions are Debian 12/13, Raspberry Pi OS 64-bit where practical, and Ubuntu Server. **Raspberry Pi 3 ARM64 has been physically validated through successful container build and stack start on Debian 64-bit, with Docker 29.9.0, Docker Compose 5.6.0, and Reticulum rns 1.5.7.**
+**Supported by design:** native Linux with Docker Engine and Docker Compose v2 on `x86_64`, `aarch64`, and `arm64`. Primary target distributions are Debian 12/13, Raspberry Pi OS 64-bit where practical, and Ubuntu Server. The managed `rnsd` service uses Linux host networking so it can bind real host interfaces; Docker Desktop and WSL do not provide the required equivalent behavior. **Raspberry Pi 3 ARM64 has been physically validated through successful container build and stack start on Debian 64-bit, with Docker 29.9.0, Docker Compose 5.6.0, and Reticulum rns 1.5.7.**
 
 ## Install on Ubuntu/Linux
 
@@ -76,6 +76,27 @@ The rnsd Docker health check reads the observer snapshot every 15 seconds (5-sec
 
 The managed startup order is deliberate: acquire the state lock, start rnsd, verify that `rnstatus` reports the local Shared Instance, record the verified generation, then start the observer and control helper. On restart the observer/helper are stopped first and cannot probe or execute commands during the gap. If the candidate daemon connects as a client to another local instance instead of owning the shared instance, the launcher stops it and remains unhealthy.
 
+### rnsd host networking on Linux
+
+On supported native Linux hosts, only the `rnsd` container uses `network_mode: host`. This lets Reticulum see the server's actual LAN and Tailscale interfaces instead of a Docker bridge interface, and lets dynamically configured TCP Server interfaces bind directly to their configured address and port. No Reticulum TCP ports are declared in Compose in advance.
+
+That means `listen_ip = 0.0.0.0` listens on all host IPv4 interfaces, `listen_ip = 192.168.1.85` listens only on that assigned LAN address, and `listen_ip = 100.x.x.x` listens only on that assigned Tailscale address. A TCP Server interface still does not open a host firewall, router, or Tailscale policy. If an explicit listen address is not assigned to the server, the GUI rejects it when a current observer snapshot can verify that fact.
+
+The web UI remains on its controlled published-port bridge network. The management agent remains internal-only on the private `management` network with no published port. Neither service communicates directly with rnsd over Docker DNS: observer status, control requests/results, config, and persistent Reticulum state use the existing shared-volume boundary. There is still no Docker socket in the UI or agent.
+
+Host networking removes Docker bridge isolation as one possible obstacle to AutoInterface seeing real LAN/link-local interfaces. It does **not** guarantee that AutoInterface can autoconfigure: host IPv6/link-local configuration, multicast behavior, and local network conditions still decide that. Verify actual AutoInterface behavior on the physical Pi before relying on it.
+
+To revert host networking without touching Reticulum state, stop the stack, restore the prior `compose.yaml` from the installer backup (or remove the `network_mode: host` entry under `rnsd`), then recreate the stack:
+
+```sh
+cd ~/reticulum-admin
+docker compose down
+# Restore compose.yaml from the backup created by the installer, or remove rnsd's network_mode: host line.
+docker compose up -d --build
+```
+
+`data/reticulum` and `data/admin` are not removed by this procedure.
+
 Open the printed URL and create the required first administrator account.
 
 ## Observability
@@ -106,7 +127,7 @@ The **Configuration** page contains node-wide settings, configuration snapshots,
 
 ### TCP guidance
 
-TCP Server fields describe where this machine listens: `listen_ip` is a local machine address (not normally its public Internet address) and `listen_port` is the room number on that address. A TCP Client uses the remote server's reachable hostname/IP and the same port the server listens on. Creating a TCP Server does not open a firewall or router. For private trusted links, Tailscale IPs or MagicDNS names can be used without public router forwarding; Reticulum Admin only explains this pattern and never installs or configures Tailscale.
+TCP Server fields describe where this machine listens: `listen_ip` is an address assigned to this server (not normally its public Internet address) and `listen_port` is the room number on that address. On the managed native-Linux deployment, rnsd uses host networking: `0.0.0.0` means all host IPv4 interfaces, a `192.168.x.x` address means that LAN address only, and a `100.x.x.x` address means that host's Tailscale address only. A TCP Client uses the remote server's reachable hostname/IP and the same port the server listens on. Creating a TCP Server does not open a firewall or router. For private trusted links, Tailscale IPs or MagicDNS names can be used without public router forwarding; Reticulum Admin only explains this pattern and never installs or configures Tailscale.
 
 Before creating a TCP Client, obtain the remote operator's hostname or address, Listen Port, and—if used—the IFAC network name, passphrase, and any explicitly required custom IFAC size. A client uses the connection for this node's own traffic with Transport Mode left Off. If other nodes should use this machine as a route to that remote network, enable Transport Mode deliberately and provide a separate usable local-side interface such as TCP Server, AutoInterface, or RNode. The provisioning review repeats these consequences without changing topology automatically.
 
@@ -152,7 +173,7 @@ Future snapshots should capture Reticulum configuration, admin configuration, in
 ## Layout
 
 ```text
-compose.yaml                 two-service deployment
+compose.yaml                 rnsd, private management agent, and web UI deployment
 install.sh                   interactive installer
 rnsd/observer.py             fixed read-only Reticulum observer
 reticulum-admin/             Flask UI and persistent SQLite app data

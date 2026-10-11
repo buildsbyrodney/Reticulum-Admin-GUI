@@ -52,6 +52,9 @@ grep -F 'TMP=${TMPDIR:-/tmp}/$ARCHIVE_NAME' "$ROOT/install.sh" >/dev/null
 # identify the newly unpacked release rather than a stale .env value.
 grep -F 'RETICULUM_ADMIN_VERSION=$APP_VERSION' "$ROOT/install.sh" >/dev/null
 grep -F 'sed "s/^RETICULUM_ADMIN_VERSION=.*/RETICULUM_ADMIN_VERSION=$APP_VERSION/"' "$ROOT/install.sh" >/dev/null
+# Host-networked rnsd intentionally refuses Docker Desktop/WSL semantics.
+grep -F 'native Linux Docker Engine' "$ROOT/install.sh" >/dev/null
+grep -F 'Docker Desktop and WSL are not supported' "$ROOT/install.sh" >/dev/null
 
 # Every interpreter script in the payload must retain a Linux shebang.
 if find "$ROOT" -path "$ROOT/.git" -prune -o -path "$ROOT/release" -prune -o -type f \( -name '*.sh' -o -name '*.py' \) -exec grep -Il "$(printf '\r')" {} + | grep -q .; then

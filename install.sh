@@ -2,8 +2,8 @@
 # Stable public release metadata. Payloads are always verified before extraction.
 PROJECT_OWNER="buildsbyrodney"
 PROJECT_REPO="Reticulum-Admin-GUI"
-PROJECT_VERSION="0.3.9"
-PROJECT_TAG="v0.3.9"
+PROJECT_VERSION="0.3.10"
+PROJECT_TAG="v0.3.10"
 ARCHIVE_NAME="reticulum-admin-${PROJECT_VERSION}.tar.gz"
 CHECKSUM_NAME="${ARCHIVE_NAME}.sha256"
 PROJECT_RELEASE_URL="https://github.com/buildsbyrodney/Reticulum-Admin-GUI/releases/download/${PROJECT_TAG}/${ARCHIVE_NAME}"
@@ -21,6 +21,15 @@ case "$ARCH" in
   x86_64|aarch64|arm64) ;;
   *) echo "Unsupported architecture: $ARCH (supported: x86_64, aarch64, arm64)" >&2; exit 1 ;;
 esac
+
+# The managed rnsd container uses Linux host networking so Reticulum can see
+# real LAN and Tailscale interfaces. Docker Desktop-style host networking is
+# not equivalent, so do not offer an installation that appears to support it.
+if [ "$(uname -s)" != "Linux" ] || grep -qi microsoft /proc/version 2>/dev/null; then
+  echo "This managed rnsd deployment requires native Linux Docker Engine." >&2
+  echo "Use Debian, Raspberry Pi OS, or Ubuntu Server; Docker Desktop and WSL are not supported for host-networked rnsd." >&2
+  exit 1
+fi
 
 has_project() { test -f "$1/compose.yaml" && test -d "$1/reticulum-admin"; }
 
