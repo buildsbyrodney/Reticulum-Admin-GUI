@@ -183,6 +183,48 @@ class LiveRnstatusTests(unittest.TestCase):
         self.assertNotIn("listen_ip", fields)
         self.assertNotIn("listen_port", fields)
 
+    def test_tcp_prerequisites_and_ifac_controls_are_visible(self):
+        client = self.client()
+        tcp_client = client.get("/interfaces/add?purpose=tcp_client").get_data(as_text=True)
+        tcp_server = client.get("/interfaces/add?purpose=user_tcp").get_data(as_text=True)
+        help_page = client.get("/help").get_data(as_text=True)
+        self.assertIn("Before you connect to a remote Reticulum server, you need:", tcp_client)
+        self.assertIn("Transport Mode can remain Off.", tcp_client)
+        self.assertIn("Let other Reticulum nodes reach that remote network through this node", tcp_client)
+        self.assertIn("Before another Reticulum node can connect to this server:", tcp_server)
+        self.assertIn("fields.querySelectorAll('input').forEach(e => e.disabled = !ifac.checked)", tcp_client)
+        self.assertIn("Using Tailscale", tcp_client + help_page)
+        self.assertIn("must match that server’s Listen Port", tcp_client)
+        self.assertNotIn("Cloudflare", tcp_client + tcp_server + help_page)
+
+    def test_ifac_must_be_enabled_and_is_not_inherited(self):
+        base = {"purpose": "tcp_client", "interface_type": "TCPClientInterface", "name": "Upstream", "enabled": "on", "mode": "full", "target_host": "server.example", "target_port": "4242"}
+        with self.assertRaisesRegex(ValueError, "IFAC is not enabled"):
+            self.app_module.make_interface_change({**base, "network_name": "other-interface"})
+        with self.assertRaisesRegex(ValueError, "IFAC requires both"):
+            self.app_module.make_interface_change({**base, "ifac_enabled": "on", "network_name": "remote"})
+        change = self.app_module.make_interface_change(base)
+        self.assertNotIn("network_name", change["interface"]["fields"])
+        self.assertNotIn("passphrase", change["interface"]["fields"])
+
+    def test_route_for_others_review_warns_about_transport_and_second_interface(self):
+        client = self.client()
+        original = self.app_module.management
+        self.app_module.CONFIG_VIEW_CACHE["config"] = {"global": {"enable_transport": "No"}, "interfaces": []}
+        self.app_module.management = lambda path, body=None, timeout=None: {"ok": True, "diff": []}
+        try:
+            response = client.post("/interfaces/add?purpose=tcp_client", data={
+                "csrf_token": "test-csrf", "purpose": "tcp_client", "interface_type": "TCPClientInterface",
+                "name": "Upstream", "enabled": "on", "mode": "full", "target_host": "server.example",
+                "target_port": "4242", "tcp_client_goal": "route_others",
+            })
+        finally:
+            self.app_module.management = original
+        page = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Transport Mode is currently: Off", page)
+        self.assertIn("no second configured interface", page)
+
     def test_configuration_agent_timeout_is_recorded_not_http_500(self):
         client = self.client()
         original = self.app_module.management

@@ -73,7 +73,7 @@ def csrf_token():
 
 @app.context_processor
 def common_values():
-    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.8")}
+    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.9")}
 
 def require_csrf():
     if not secrets.compare_digest(session.get("csrf", ""), request.form.get("csrf_token", "")): abort(400, "Invalid form token")
@@ -335,9 +335,9 @@ def make_interface_change(form):
     # TCP Client would inherit the server form's default listen_ip and the
     # allowlisted configuration adapter would (correctly) reject it.
     type_text_fields = {
-        "TCPServerInterface": ("listen_ip", "network_name"),
-        "TCPClientInterface": ("target_host", "network_name"),
-        "AutoInterface": ("network_name",),
+        "TCPServerInterface": ("listen_ip",),
+        "TCPClientInterface": ("target_host",),
+        "AutoInterface": (),
     }
     type_port_fields = {
         "TCPServerInterface": ("listen_port",),
@@ -350,15 +350,40 @@ def make_interface_change(form):
     for key in type_port_fields.get(interface_type, ()):
         value = form.get(key, "").strip()
         if value: fields[key] = int(value) if value.isdigit() else value
-    if form.get("ifac_enabled"):
-        if not form.get("network_name", "").strip() or not form.get("passphrase", ""):
+    ifac_enabled = bool(form.get("ifac_enabled"))
+    network_name = form.get("network_name", "").strip()
+    passphrase = form.get("passphrase", "")
+    custom_ifac_size = form.get("ifac_size_mode") == "custom"
+    if not ifac_enabled and (network_name or passphrase or custom_ifac_size):
+        raise ValueError("You entered IFAC settings, but IFAC is not enabled. Enable IFAC or clear the IFAC fields.")
+    if ifac_enabled:
+        if not network_name or not passphrase:
             raise ValueError("IFAC requires both a network name and a passphrase")
-        fields["passphrase"] = form["passphrase"]
-        if form.get("ifac_size_mode") == "custom":
+        # IFAC is deliberately per-interface. Nothing is copied from another
+        # configured interface, even if it happens to use similar credentials.
+        fields["network_name"] = network_name
+        fields["passphrase"] = passphrase
+        if custom_ifac_size:
             bits = form.get("ifac_size_bits", "")
             if not bits.isdigit() or int(bits) < 8 or int(bits) > 512 or int(bits) % 8: raise ValueError("Custom IFAC size must be a whole number of bytes from 8 to 512 bits")
             fields["ifac_size"] = int(bits) // 8
     return {"kind":"interface_create", "interface": {"name":form.get("name", "").strip(), "type":interface_type, "enabled":bool(form.get("enabled")), "mode":form.get("mode") or preset.get("mode", "full"), "fields":fields}}
+
+def provisioning_summary(change, form):
+    """Explain the intent and prerequisites; never alter topology implicitly."""
+    interface = change.get("interface") or {}
+    interface_type = interface.get("type")
+    if interface_type == "TCPClientInterface":
+        route_others = form.get("tcp_client_goal") == "route_others"
+        configured = configuration_model().get("interfaces", [])
+        usable_other = any(str(item.get("enabled", "Yes")).lower() not in ("no", "false", "0") for item in configured)
+        return {"kind": "tcp_client", "route_others": route_others,
+                "transport": transport_enabled(), "has_other_interface": usable_other}
+    if interface_type == "TCPServerInterface":
+        return {"kind": "tcp_server"}
+    if interface_type == "AutoInterface":
+        return {"kind": "auto"}
+    return None
 
 def preview_provision_change(change, reason, warning=None):
     result = management("/config/preview", {"change":change}, timeout=float(os.environ.get("MANAGEMENT_PREVIEW_TIMEOUT", "5")))
@@ -409,7 +434,7 @@ def system_info():
         values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line)
         memory = values.get("MemTotal", "Unavailable").strip()
     except OSError: pass
-    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.8"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
+    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.9"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
@@ -497,7 +522,7 @@ def interface_add():
             preview, warning = preview_provision_change(change, request.form.get("reason", "Add interface"), "Creating a TCP Server does not automatically make it Internet reachable; firewall, NAT, or router configuration may still be required." if change["interface"]["type"] == "TCPServerInterface" else None)
         except ValueError as error:
             flash(str(error), "error"); return redirect(url_for("interface_add", purpose=request.form.get("purpose", "manual")))
-        return render_template("configuration_preview.html", title="Review New Interface", preview=preview, change=change, warning=warning)
+        return render_template("configuration_preview.html", title="Review New Interface", preview=preview, change=change, warning=warning, setup_summary=provisioning_summary(change, request.form))
     purpose = request.args.get("purpose", "user_tcp")
     return render_template("interface_form.html", title="Add Interface", presets=PRESETS, selected=purpose, values=PRESETS.get(purpose, {}), modes=MODE_HELP, clone=False)
 
