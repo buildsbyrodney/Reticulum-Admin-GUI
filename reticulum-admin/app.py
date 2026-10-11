@@ -73,7 +73,7 @@ def csrf_token():
 
 @app.context_processor
 def common_values():
-    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.4")}
+    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.5")}
 
 def require_csrf():
     if not secrets.compare_digest(session.get("csrf", ""), request.form.get("csrf_token", "")): abort(400, "Invalid form token")
@@ -163,7 +163,10 @@ def merge_interface_models(configured, observed):
                     "configured_enabled": configured_item.get("enabled"),
                     "configured_mode": configured_item.get("mode"),
                     "configured_fields": configured_item.get("fields") or {},
-                    "configured_ifac": bool((configured_item.get("fields") or {}).get("passphrase") or configured_item.get("ifac_enabled"))})
+                    # A restored AutoInterface can legitimately omit ifac_size:
+                    # network_name + passphrase still mean IFAC is configured.
+                    "configured_ifac": bool(any((configured_item.get("fields") or {}).get(key) for key in ("network_name", "ifac_netname", "passphrase", "ifac_passphrase")) or configured_item.get("ifac_enabled")),
+                    "configured_ifac_size": (configured_item.get("fields") or {}).get("ifac_size")})
         configured_rows.append(row)
     runtime_rows = []
     for runtime in remaining:
@@ -172,7 +175,7 @@ def merge_interface_models(configured, observed):
         row.update({"configured": False, "runtime_only": True, "system_internal": internal,
                     "editable": False, "cloneable": False, "deletable": False,
                     "configured_enabled": None, "configured_mode": None,
-                    "configured_fields": {}, "configured_ifac": None})
+                    "configured_fields": {}, "configured_ifac": None, "configured_ifac_size": None})
         runtime_rows.append(row)
     return configured_rows, runtime_rows
 
@@ -380,7 +383,7 @@ def system_info():
         values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line)
         memory = values.get("MemTotal", "Unavailable").strip()
     except OSError: pass
-    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.4"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
+    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.5"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
@@ -700,6 +703,10 @@ def snapshot_restore(snapshot_id):
         compare=management(f"/snapshots/{snapshot_id}/compare", {})
         return render_template("snapshot_restore_confirm.html", title="Confirm Snapshot Restore", snapshot_id=snapshot_id, result=compare)
     result=management(f"/snapshots/{snapshot_id}/restore", {"admin":session["admin"],"reason":"Manual snapshot restore"})
+    # A restore replaces the config behind the web process. Never show a
+    # pre-restore interface list from the fast local configuration cache.
+    if result.get("ok"):
+        CONFIG_VIEW_CACHE["config"] = None
     record_config_change(result, {"setting":f"restore snapshot {snapshot_id}"}); flash("Snapshot restored." if result.get("ok") else "Restore failed; safety rollback attempted.", "success" if result.get("ok") else "error")
     return redirect(url_for("snapshots"))
 

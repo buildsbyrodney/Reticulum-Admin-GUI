@@ -32,7 +32,7 @@ class LiveRnstatusTests(unittest.TestCase):
             con.execute("INSERT INTO admins VALUES (?, ?, ?)", ("admin", "hash", 0))
         cls.app_module.CONFIG_VIEW_CACHE["config"] = {
             "global": {"enable_transport": "No", "loglevel": "4"},
-            "interfaces": [{"name": "Default Interface", "type": "AutoInterface", "enabled": "Yes", "mode": "full", "fields": {}}],
+            "interfaces": [{"name": "Default Interface", "type": "AutoInterface", "enabled": "Yes", "mode": "full", "fields": {"network_name": "ASH", "passphrase": "ASHVILLE"}}],
         }
 
     @classmethod
@@ -49,7 +49,7 @@ class LiveRnstatusTests(unittest.TestCase):
     def setUp(self):
         self.app_module.CONFIG_VIEW_CACHE["config"] = {
             "global": {"enable_transport": "No", "loglevel": "4"},
-            "interfaces": [{"name": "Default Interface", "type": "AutoInterface", "enabled": "Yes", "mode": "full", "fields": {}}],
+            "interfaces": [{"name": "Default Interface", "type": "AutoInterface", "enabled": "Yes", "mode": "full", "fields": {"network_name": "ASH", "passphrase": "ASHVILLE"}}],
         }
 
     def test_adapter_normalizes_real_pi_fields(self):
@@ -93,6 +93,8 @@ class LiveRnstatusTests(unittest.TestCase):
         client = self.client()
         page = client.get("/interfaces").get_data(as_text=True)
         self.assertEqual(page.count("Default Interface</td>"), 1)
+        self.assertIn("Configured: Enabled", page)
+        self.assertIn("Size: Use interface default", page)
         self.assertIn("/interfaces/Default%20Interface/edit", page)
         self.assertNotIn("/interfaces/Shared%20Instance%5Brns/default%5D/edit", page)
         self.assertNotIn("/interfaces/LocalClientInterface%5Btest-client%5D/clone", page)
