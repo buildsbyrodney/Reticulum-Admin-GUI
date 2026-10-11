@@ -231,8 +231,14 @@ def atomic_write(text):
         if os.path.exists(path): os.unlink(path)
 
 def create_snapshot(admin, reason, change, automatic=True, parent=None):
-    text = read_config(); SNAPSHOTS.mkdir(parents=True, exist_ok=True); sid = f"{int(time.time()*1000)}"
-    directory = SNAPSHOTS / sid; directory.mkdir(mode=0o700)
+    text = read_config(); SNAPSHOTS.mkdir(parents=True, exist_ok=True)
+    # Millisecond IDs could collide when a restore creates its safety snapshot
+    # immediately after another change. Keep the durable numeric ID format but
+    # use a nanosecond source and retain a deterministic collision fallback.
+    sid = f"{time.time_ns()}"; directory = SNAPSHOTS / sid
+    while directory.exists():
+        sid = str(int(sid) + 1); directory = SNAPSHOTS / sid
+    directory.mkdir(mode=0o700)
     (directory / "config").write_text(text, encoding="utf-8"); os.chmod(directory / "config", 0o600)
     safe_change = json.loads(json.dumps(change))
     for key in ("passphrase", "ifac_passphrase", "network_key"):
