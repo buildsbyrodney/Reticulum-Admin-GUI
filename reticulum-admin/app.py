@@ -73,7 +73,7 @@ def csrf_token():
 
 @app.context_processor
 def common_values():
-    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.6")}
+    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.7")}
 
 def require_csrf():
     if not secrets.compare_digest(session.get("csrf", ""), request.form.get("csrf_token", "")): abort(400, "Invalid form token")
@@ -254,7 +254,19 @@ def management(path, body=None, timeout=None):
             return payload
     except (TimeoutError, socket.timeout) as error:
         return {"ok":False, "unknown":True, "error":"The management operation did not return a result in time. Reticulum may still have applied the change. Check current status before retrying.", "technical_error":str(error)}
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, ValueError, OSError) as error:
+    except urllib.error.HTTPError as error:
+        # A 4xx response from the allowlisted management API is commonly a
+        # validation rejection. It completed before any live change was made,
+        # so preserve its safe, structured explanation instead of presenting
+        # it as an uncertain timeout that might invite an unsafe retry.
+        try:
+            payload = json.loads(error.read().decode("utf-8"))
+            if isinstance(payload, dict):
+                return payload
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError, ValueError):
+            pass
+        return {"ok":False, "unknown":True, "error":"The management operation did not return a usable result. Reticulum may still have applied the change. Check current status before retrying.", "technical_error":str(error)}
+    except (urllib.error.URLError, json.JSONDecodeError, ValueError, OSError) as error:
         return {"ok":False, "unknown":True, "error":"The management operation did not return a usable result. Reticulum may still have applied the change. Check current status before retrying.", "technical_error":str(error)}
 
 def record_config_change(result, change):
@@ -383,7 +395,7 @@ def system_info():
         values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line)
         memory = values.get("MemTotal", "Unavailable").strip()
     except OSError: pass
-    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.6"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
+    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.7"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():

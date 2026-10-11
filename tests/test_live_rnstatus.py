@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 
 
@@ -126,6 +127,47 @@ class LiveRnstatusTests(unittest.TestCase):
         self.assertIn("Public User TCP      0.0.0.0:4242", help_page)
         self.assertIn("Trusted Backbone     0.0.0.0:4243", help_page)
         self.assertNotIn("Cloudflare", form + help_page)
+
+    def test_interface_preview_shows_agent_validation_error_not_unknown_result(self):
+        """A rejected preview must say why it was rejected; nothing was applied."""
+        client = self.client()
+        original_urlopen = self.app_module.urllib.request.urlopen
+        original_token = os.environ.get("MANAGEMENT_TOKEN")
+        original_url = os.environ.get("MANAGEMENT_URL")
+        os.environ["MANAGEMENT_TOKEN"] = "test-management-token"
+        os.environ["MANAGEMENT_URL"] = "http://management-agent:8081"
+        response_body = json.dumps({
+            "ok": False,
+            "error": "Target Host must be the hostname or IP address of the remote Reticulum TCP server.",
+        }).encode("utf-8")
+
+        def rejected_preview(*args, **kwargs):
+            raise urllib.error.HTTPError(
+                "http://management-agent:8081/config/preview", 400,
+                "Bad Request", {}, __import__("io").BytesIO(response_body),
+            )
+
+        self.app_module.urllib.request.urlopen = rejected_preview
+        try:
+            response = client.post("/interfaces/add?purpose=tcp_client", data={
+                "csrf_token": "test-csrf", "purpose": "tcp_client",
+                "interface_type": "TCPClientInterface", "name": "Test upstream",
+                "enabled": "on", "mode": "full", "target_host": "bad host value", "target_port": "4243",
+            }, follow_redirects=True)
+        finally:
+            self.app_module.urllib.request.urlopen = original_urlopen
+            if original_token is None:
+                os.environ.pop("MANAGEMENT_TOKEN", None)
+            else:
+                os.environ["MANAGEMENT_TOKEN"] = original_token
+            if original_url is None:
+                os.environ.pop("MANAGEMENT_URL", None)
+            else:
+                os.environ["MANAGEMENT_URL"] = original_url
+        page = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Target Host must be the hostname or IP address of the remote Reticulum TCP server.", page)
+        self.assertNotIn("management operation did not return a usable result", page)
 
     def test_configuration_agent_timeout_is_recorded_not_http_500(self):
         client = self.client()
