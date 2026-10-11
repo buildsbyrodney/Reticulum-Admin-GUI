@@ -169,6 +169,20 @@ class LiveRnstatusTests(unittest.TestCase):
         self.assertIn("Target Host must be the hostname or IP address of the remote Reticulum TCP server.", page)
         self.assertNotIn("management operation did not return a usable result", page)
 
+    def test_tcp_client_does_not_submit_server_listen_settings(self):
+        """The shared beginner form must not leak its server defaults to a client."""
+        change = self.app_module.make_interface_change({
+            "purpose": "tcp_client", "interface_type": "TCPClientInterface",
+            "name": "Known upstream", "enabled": "on", "mode": "full",
+            "listen_ip": "0.0.0.0", "listen_port": "4242",
+            "target_host": "mtgy-server", "target_port": "4243",
+        })
+        fields = change["interface"]["fields"]
+        self.assertEqual(fields["target_host"], "mtgy-server")
+        self.assertEqual(fields["target_port"], 4243)
+        self.assertNotIn("listen_ip", fields)
+        self.assertNotIn("listen_port", fields)
+
     def test_configuration_agent_timeout_is_recorded_not_http_500(self):
         client = self.client()
         original = self.app_module.management

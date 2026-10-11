@@ -73,7 +73,7 @@ def csrf_token():
 
 @app.context_processor
 def common_values():
-    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.7")}
+    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.8")}
 
 def require_csrf():
     if not secrets.compare_digest(session.get("csrf", ""), request.form.get("csrf_token", "")): abort(400, "Invalid form token")
@@ -330,10 +330,24 @@ def make_interface_change(form):
     preset = PRESETS.get(purpose, {})
     interface_type = form.get("interface_type") or preset.get("type")
     fields = {}
-    for key in ("listen_ip", "target_host", "network_name"):
+    # The shared form contains both server and client controls for clarity.
+    # Send only settings supported by the selected interface type: otherwise a
+    # TCP Client would inherit the server form's default listen_ip and the
+    # allowlisted configuration adapter would (correctly) reject it.
+    type_text_fields = {
+        "TCPServerInterface": ("listen_ip", "network_name"),
+        "TCPClientInterface": ("target_host", "network_name"),
+        "AutoInterface": ("network_name",),
+    }
+    type_port_fields = {
+        "TCPServerInterface": ("listen_port",),
+        "TCPClientInterface": ("target_port",),
+        "AutoInterface": (),
+    }
+    for key in type_text_fields.get(interface_type, ("network_name",)):
         value = form.get(key, "").strip()
         if value: fields[key] = value
-    for key in ("listen_port", "target_port"):
+    for key in type_port_fields.get(interface_type, ()):
         value = form.get(key, "").strip()
         if value: fields[key] = int(value) if value.isdigit() else value
     if form.get("ifac_enabled"):
@@ -395,7 +409,7 @@ def system_info():
         values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line)
         memory = values.get("MemTotal", "Unavailable").strip()
     except OSError: pass
-    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.7"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
+    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.8"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
