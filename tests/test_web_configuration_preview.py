@@ -56,6 +56,13 @@ class WebConfigurationPreviewTests(unittest.TestCase):
         self.assertTrue(rows[0]["trusted"])
         self.assertNotIn("ifac_netkey", rows[0])
 
+    def test_admin_gunicorn_keeps_one_worker_but_allows_another_request_thread(self):
+        dockerfile = (Path(__file__).parents[1] / "reticulum-admin" / "Dockerfile").read_text()
+        self.assertIn('"--workers", "1"', dockerfile)
+        self.assertIn('"--worker-class", "gthread"', dockerfile)
+        self.assertIn('"--threads", "2"', dockerfile)
+        self.assertIn('"--keep-alive", "2"', dockerfile)
+
     def test_review_route_does_not_ingest_or_write_observer_state(self):
         old_ingest = self.web_app.ingest_snapshot
         self.web_app.ingest_snapshot = lambda: (_ for _ in ()).throw(AssertionError("Review must not ingest observer state"))

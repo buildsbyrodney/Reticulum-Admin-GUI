@@ -25,6 +25,10 @@ No discovery action opens a firewall, configures Tailscale, publishes a credenti
 7. If testing a bootstrap connection, set only that interface to Bootstrap-only, then confirm normal rnsd health, observer status, and persistence after a reboot.
 8. Keep `publish_ifac` off unless every peer and the discovery arrangement are intentionally trusted.
 
+## Web request reliability
+
+The admin web service runs one Gunicorn worker on a Pi, with two lightweight request threads and a two-second keep-alive. This prevents an incomplete browser connection from monopolising the only worker while a separate reviewed configuration request is waiting. The management agent remains single-worker and configuration operations retain their explicit bounded health/restart budgets.
+
 ## Diagnostics and LXMF Test Echo Bot
 
 The **Diagnostics** page separates network-facing configuration checks from Reticulum runtime observations. It includes per-interface diagnostics, shared-instance health, and path inspection. A successful TCP-level check alone does not prove that Reticulum or IFAC is working; the page reports those layers separately.

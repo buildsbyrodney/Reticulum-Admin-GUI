@@ -11,4 +11,8 @@ ENV PYTHONUNBUFFERED=1
 EXPOSE 8000
 # One worker is deliberate for a resource-constrained Raspberry Pi 3.  Its 110s
 # request budget is outside the 90s agent worker and 100s internal HTTP bounds.
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "1", "--timeout", "110", "--graceful-timeout", "10", "--access-logfile", "-", "app:app"]
+# Keep one Pi-friendly worker, but allow a second request thread. A browser can
+# leave an incomplete keep-alive connection open; with a single sync worker
+# that socket otherwise blocks a real configuration Apply request until the
+# Gunicorn timeout. The management operation remains bounded below 110 seconds.
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--worker-class", "gthread", "--threads", "2", "--workers", "1", "--keep-alive", "2", "--timeout", "110", "--graceful-timeout", "10", "--access-logfile", "-", "app:app"]
