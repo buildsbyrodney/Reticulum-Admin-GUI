@@ -6,6 +6,7 @@ STATUS_DIR="$CONFIG_DIR/admin-status"
 CONTROL_DIR="$CONFIG_DIR/admin-control"
 RESTART_REQUEST="$CONTROL_DIR/restart-request"
 GENERATION_FILE="$STATUS_DIR/rnsd.generation"
+CANDIDATE_MARKER="$STATUS_DIR/rnsd.candidate-started"
 RESTART_ACK="$STATUS_DIR/rnsd.restart-ack"
 OBSERVE_REQUEST="$CONTROL_DIR/observe-request"
 LOCK_FILE="$CONTROL_DIR/rnsd.lock"
@@ -30,8 +31,14 @@ case "$GENERATION" in ''|*[!0-9]*) GENERATION=0 ;; esac
 PENDING_REQUEST=""
 OBSERVER_PID=""
 CONTROL_PID=""
-CANDIDATE_READY_TRIES="${RNSD_CANDIDATE_READY_TRIES:-8}"
-CANDIDATE_ATTEMPTS="${RNSD_CANDIDATE_ATTEMPTS:-3}"
+# A Pi 3 can need well over 16 seconds before the first rnstatus request is
+# answered. Bound each candidate independently, but bound all candidate work
+# so the 70-second management health budget still leaves time for observer.
+CANDIDATE_READY_TIMEOUT="${RNSD_CANDIDATE_READY_TIMEOUT:-25}"
+STARTUP_READINESS_BUDGET="${RNSD_STARTUP_READINESS_BUDGET:-45}"
+CANDIDATE_ATTEMPTS="${RNSD_CANDIDATE_ATTEMPTS:-2}"
+CANDIDATE_STOP_TIMEOUT="${RNSD_CANDIDATE_STOP_TIMEOUT:-3}"
+SHARED_INSTANCE_PROBE="${RNS_SHARED_PROBE_COMMAND:-/usr/local/bin/check-shared-instance}"
 
 write_unready() {
   printf '{"reticulum_ready":false,"status":null,"status_error":"%s"}\n' "$1" > "$STATUS_DIR/snapshot.json"
@@ -67,11 +74,14 @@ stop_support() {
   OBSERVER_PID=""; CONTROL_PID=""; write_unready "rnsd restarting"
 }
 wait_shared() {
-  tries=0
-  while [ "$tries" -lt "$CANDIDATE_READY_TRIES" ]; do
+  candidate_deadline=$(( $(date +%s) + CANDIDATE_READY_TIMEOUT ))
+  if [ "$candidate_deadline" -gt "$STARTUP_DEADLINE" ]; then candidate_deadline="$STARTUP_DEADLINE"; fi
+  while [ "$(date +%s)" -lt "$candidate_deadline" ]; do
     kill -0 "$RNSD_PID" 2>/dev/null || return 1
-    if /usr/local/bin/check-shared-instance "$CONFIG_DIR" >/dev/null 2>&1; then return 0; fi
-    tries=$((tries + 1)); sleep 1
+    # A bounded unsuccessful probe does not mean the live candidate failed.
+    # Keep it running for the full readiness window before deciding to stop it.
+    if "$SHARED_INSTANCE_PROBE" "$CONFIG_DIR" >/dev/null 2>&1; then return 0; fi
+    sleep 1
   done
   return 1
 }
@@ -79,18 +89,19 @@ wait_shared() {
 # probe uses require_shared_instance, so it cannot create a master while it is
 # checking. This also prevents a candidate from silently joining an old owner.
 wait_for_no_shared_instance() {
-  tries=0
-  while [ "$tries" -lt "$CANDIDATE_READY_TRIES" ]; do
-    if ! /usr/local/bin/check-shared-instance "$CONFIG_DIR" >/dev/null 2>&1; then return 0; fi
+  close_deadline=$(( $(date +%s) + 8 ))
+  if [ "$close_deadline" -gt "$STARTUP_DEADLINE" ]; then close_deadline="$STARTUP_DEADLINE"; fi
+  while [ "$(date +%s)" -lt "$close_deadline" ]; do
+    if ! "$SHARED_INSTANCE_PROBE" "$CONFIG_DIR" >/dev/null 2>&1; then return 0; fi
     log "Waiting for previous shared instance to close"
-    tries=$((tries + 1)); sleep 1
+    sleep 1
   done
   return 1
 }
 stop_candidate() {
   kill "$RNSD_PID" 2>/dev/null || true
   tries=0
-  while kill -0 "$RNSD_PID" 2>/dev/null && [ "$tries" -lt 10 ]; do
+  while kill -0 "$RNSD_PID" 2>/dev/null && [ "$tries" -lt "$CANDIDATE_STOP_TIMEOUT" ]; do
     tries=$((tries + 1)); sleep 1
   done
   if kill -0 "$RNSD_PID" 2>/dev/null; then
@@ -98,6 +109,7 @@ stop_candidate() {
     kill -9 "$RNSD_PID" 2>/dev/null || true
   fi
   wait "$RNSD_PID" 2>/dev/null || true
+  rm -f "$CANDIDATE_MARKER"
 }
 start_support() {
   log "Starting observer"
@@ -120,13 +132,16 @@ while true; do
   # restart. A transient shared-socket race stays inside the health budget.
   candidate_attempt=0
   candidate_ready=no
+  STARTUP_DEADLINE=$(( $(date +%s) + STARTUP_READINESS_BUDGET ))
   while [ "$candidate_attempt" -lt "$CANDIDATE_ATTEMPTS" ]; do
+    if [ "$(date +%s)" -ge "$STARTUP_DEADLINE" ]; then break; fi
     write_unready "rnsd starting"
     if ! wait_for_no_shared_instance; then
       log "Previous shared instance did not close; refusing to start a competing candidate"
       exit 1
     fi
     log "Starting rnsd candidate generation $((GENERATION + 1))"
+    : > "$CANDIDATE_MARKER"
     rnsd --config "$CONFIG_DIR" --service &
     RNSD_PID=$!
     log "Waiting for shared instance"
@@ -134,7 +149,7 @@ while true; do
       candidate_ready=yes
       break
     fi
-    diagnostic=$(/usr/local/bin/check-shared-instance "$CONFIG_DIR" 2>&1 || true)
+    diagnostic=$("$SHARED_INSTANCE_PROBE" "$CONFIG_DIR" 2>&1 || true)
     log "rnsd candidate did not become shared instance${diagnostic:+: $diagnostic}"
     stop_candidate
     candidate_attempt=$((candidate_attempt + 1))
@@ -145,6 +160,7 @@ while true; do
   done
   if [ "$candidate_ready" = yes ]; then
     log "Shared instance verified"
+    rm -f "$CANDIDATE_MARKER"
     GENERATION=$((GENERATION + 1))
     printf '%s\n' "$GENERATION" > "$GENERATION_FILE"
     : > "$OBSERVE_REQUEST"

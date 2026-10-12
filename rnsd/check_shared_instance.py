@@ -4,8 +4,9 @@ import json, os, subprocess, sys
 
 config = sys.argv[1]
 # This is a readiness check, not a diagnostic command. A missing shared
-# instance must not hold up each launcher retry for several seconds.
-timeout = float(os.environ.get("RNS_SHARED_PROBE_TIMEOUT", "1"))
+# instance, but a Pi can need a couple of seconds to service rnstatus while
+# Reticulum is still initialising interfaces.
+timeout = float(os.environ.get("RNS_SHARED_PROBE_TIMEOUT", "2"))
 try:
     result = subprocess.run(["rnstatus", "--config", config, "--json", "--all"], capture_output=True, text=True, timeout=timeout)
     data = json.loads(result.stdout) if result.returncode == 0 else None

@@ -21,6 +21,10 @@ jobs:
         run: |
           chmod +x tests/test_discovery_runtime.sh
           ./tests/test_discovery_runtime.sh
+      - name: Verify Pi-scale shared-instance readiness window
+        run: |
+          chmod +x tests/test_rnsd_readiness_window.sh
+          ./tests/test_rnsd_readiness_window.sh
       - name: Build and inspect release archive
         run: |
           chmod +x scripts/build-release.sh
