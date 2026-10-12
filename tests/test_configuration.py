@@ -53,13 +53,14 @@ class ConfigurationTests(unittest.TestCase):
     def test_restart_health_waits_for_new_generation_within_deadline(self):
         old_generation, old_probe, old_monotonic, old_sleep, old_budget = cfg.rnsd_generation, cfg.probe_health, cfg.time.monotonic, cfg.time.sleep, cfg.RESTART_HEALTH_TIMEOUT
         clock = [0]
-        # A 28-second launch would have exceeded the old web timeout in the live
-        # failure.  It remains inside the explicit 35-second restart budget.
+        # A Pi can need one failed candidate plus a Docker relaunch before the
+        # verified generation advances. This 56-second case would have rolled
+        # back under the old 35-second budget.
         try:
-            cfg.RESTART_HEALTH_TIMEOUT = 35
+            cfg.RESTART_HEALTH_TIMEOUT = 70
             cfg.time.monotonic = lambda: clock[0]
             cfg.time.sleep = lambda seconds: clock.__setitem__(0, clock[0] + 7)
-            cfg.rnsd_generation = lambda: 8 if clock[0] >= 28 else 7
+            cfg.rnsd_generation = lambda: 8 if clock[0] >= 56 else 7
             cfg.probe_health = lambda *args: (True, "healthy")
             ok, detail, verification = cfg.health(True, 7, "CFG-20261010-051834-A1B2C3")
         finally:

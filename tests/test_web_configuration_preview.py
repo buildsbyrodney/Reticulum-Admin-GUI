@@ -63,6 +63,18 @@ class WebConfigurationPreviewTests(unittest.TestCase):
         self.assertIn('"--threads", "2"', dockerfile)
         self.assertIn('"--keep-alive", "2"', dockerfile)
 
+    def test_restart_timeout_hierarchy_covers_a_verified_rollback(self):
+        root = Path(__file__).parents[1]
+        agent = (root / "management-agent" / "Dockerfile").read_text()
+        web = (root / "reticulum-admin" / "Dockerfile").read_text()
+        compose = (root / "compose.yaml").read_text()
+        # A restart may use 70 seconds, and a health-verified rollback may use
+        # another 70. Outer layers must not terminate either operation early.
+        self.assertIn('"--timeout", "170"', agent)
+        self.assertIn('"--timeout", "195"', web)
+        self.assertIn('RESTART_HEALTH_TIMEOUT: ${RESTART_HEALTH_TIMEOUT:-70}', compose)
+        self.assertIn('MANAGEMENT_HTTP_TIMEOUT: ${MANAGEMENT_HTTP_TIMEOUT:-180}', compose)
+
     def test_discovery_form_treats_unset_optional_values_as_empty(self):
         class Form(dict):
             def get(self, key, default=None): return super().get(key, default)

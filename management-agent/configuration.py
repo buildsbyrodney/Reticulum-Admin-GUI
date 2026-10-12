@@ -17,7 +17,11 @@ OPERATIONS = ROOT / "admin-config-operations"
 # These values deliberately fit inside the explicit Gunicorn and HTTP budgets.
 # A Pi 3 can take a while to relaunch rnsd, so observer-based health has a
 # bounded deadline and never runs an agent-local Reticulum CLI probe.
-RESTART_HEALTH_TIMEOUT = float(os.environ.get("RESTART_HEALTH_TIMEOUT", "35"))
+# A failed Pi candidate can take almost a minute to be stopped and relaunched
+# by Docker before its next candidate owns the shared instance. Give the
+# observer verification enough time for that bounded retry; the enclosing
+# agent and web deadlines are intentionally larger (see compose.yaml).
+RESTART_HEALTH_TIMEOUT = float(os.environ.get("RESTART_HEALTH_TIMEOUT", "70"))
 INTERFACE_HEALTH_TIMEOUT = float(os.environ.get("INTERFACE_HEALTH_TIMEOUT", "10"))
 POLL_INTERVAL = float(os.environ.get("RESTART_POLL_INTERVAL", "0.75"))
 SNAPSHOT_FILE = STATUS_DIR / "snapshot.json"

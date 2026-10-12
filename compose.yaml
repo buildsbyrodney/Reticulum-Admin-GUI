@@ -11,7 +11,7 @@ services:
     network_mode: host
     environment:
       SERVER_TIMEZONE: ${SERVER_TIMEZONE:-America/Chicago}
-      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.5.2}
+      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.5.3}
       HOST_ARCH: ${HOST_ARCH:-unknown}
       HOST_OS: ${HOST_OS:-unknown}
       INSTALL_DOCKER_VERSION: ${INSTALL_DOCKER_VERSION:-unknown}
@@ -37,11 +37,12 @@ services:
     restart: unless-stopped
     environment:
       MANAGEMENT_TOKEN: ${MANAGEMENT_TOKEN:?Set MANAGEMENT_TOKEN in .env}
-      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.5.2}
+      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.5.3}
       RETICULUM_DIR: /reticulum
-      # Observer-based health and this bounded restart budget fit inside the explicit
-      # 90-second agent worker and 100-second web request budgets.
-      RESTART_HEALTH_TIMEOUT: ${RESTART_HEALTH_TIMEOUT:-35}
+      # One Pi candidate can fail and be relaunched before it owns the shared
+      # instance. A full apply and a possible verified rollback fit inside the
+      # explicit 170-second agent and 180-second web request budgets.
+      RESTART_HEALTH_TIMEOUT: ${RESTART_HEALTH_TIMEOUT:-70}
       INTERFACE_HEALTH_TIMEOUT: ${INTERFACE_HEALTH_TIMEOUT:-10}
       CONTROL_OPERATION_TIMEOUT: ${CONTROL_OPERATION_TIMEOUT:-25}
     volumes:
@@ -62,12 +63,12 @@ services:
       SERVER_TIMEZONE: ${SERVER_TIMEZONE:-America/Chicago}
       MANAGEMENT_URL: http://management-agent:8081
       MANAGEMENT_TOKEN: ${MANAGEMENT_TOKEN:?Set MANAGEMENT_TOKEN in .env}
-      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.5.2}
+      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.5.3}
       HOST_ARCH: ${HOST_ARCH:-unknown}
       HOST_OS: ${HOST_OS:-unknown}
       INSTALL_DOCKER_VERSION: ${INSTALL_DOCKER_VERSION:-unknown}
       INSTALL_COMPOSE_VERSION: ${INSTALL_COMPOSE_VERSION:-unknown}
-      MANAGEMENT_HTTP_TIMEOUT: ${MANAGEMENT_HTTP_TIMEOUT:-100}
+      MANAGEMENT_HTTP_TIMEOUT: ${MANAGEMENT_HTTP_TIMEOUT:-180}
       MANAGEMENT_PREVIEW_TIMEOUT: ${MANAGEMENT_PREVIEW_TIMEOUT:-5}
     ports:
       - "${ADMIN_BIND_ADDRESS:-127.0.0.1}:${ADMIN_PORT:-8740}:8000"
