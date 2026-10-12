@@ -347,6 +347,7 @@ class LiveRnstatusTests(unittest.TestCase):
             page = self.client().get("/paths?q=Known").get_data(as_text=True)
             self.assertIn("Prepare Recovery", page)
             self.assertIn("Edit Label", page)
+            self.assertIn('class="path-actions"', page)
             self.assertIn("Blackhole requires a verified identity hash", page)
             rejected = self.client().post("/recovery", data={"csrf_token": "test-csrf", "identity": destination, "blackhole": "on"}, follow_redirects=True)
             self.assertIn("known as a destination", rejected.get_data(as_text=True))
