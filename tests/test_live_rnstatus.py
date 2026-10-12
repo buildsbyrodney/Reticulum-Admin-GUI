@@ -305,6 +305,50 @@ class LiveRnstatusTests(unittest.TestCase):
         self.assertIn("Identified TCP peers: 0", page)
         self.assertIn("does not expose enough per-client detail", page)
 
+    def test_label_create_edit_clear_and_undo_are_sqlite_only(self):
+        module = self.app_module
+        original_management = module.management
+        original_ingest = module.ingest_snapshot
+        module.management = lambda *args, **kwargs: self.fail("labels must not call management")
+        module.ingest_snapshot = lambda *args, **kwargs: self.fail("labels must not ingest observer data")
+        client = self.client()
+        try:
+            response = client.post("/labels", data={"csrf_token": "test-csrf", "entity_type": "destination", "entity_value": "a" * 32, "label": "Known User", "notes": "first"})
+            self.assertEqual(response.status_code, 302)
+            response = client.post("/labels", data={"csrf_token": "test-csrf", "entity_type": "destination", "entity_value": "a" * 32, "label": "Known User 2", "notes": "second"})
+            self.assertEqual(response.status_code, 302)
+            with module.db() as con:
+                self.assertEqual(con.execute("SELECT label FROM labels WHERE entity_value=?", ("a" * 32,)).fetchone()["label"], "Known User 2")
+                self.assertEqual(con.execute("SELECT COUNT(*) AS n FROM label_history WHERE entity_value=?", ("a" * 32,)).fetchone()["n"], 2)
+            client.post("/labels/undo", data={"csrf_token": "test-csrf", "entity_type": "destination", "entity_value": "a" * 32})
+            self.assertEqual(module.labels()[("destination", "a" * 32)]["label"], "Known User")
+            client.post("/labels/clear", data={"csrf_token": "test-csrf", "entity_type": "destination", "entity_value": "a" * 32, "confirm": "CLEAR LABEL"})
+            self.assertNotIn(("destination", "a" * 32), module.labels())
+        finally:
+            module.management = original_management
+            module.ingest_snapshot = original_ingest
+
+    def test_paths_classify_by_context_and_prepare_safe_recovery(self):
+        module = self.app_module
+        destination, transport, identity = "a" * 32, "b" * 32, "c" * 32
+        paths = [{"hash": destination, "via": transport, "interface": "VM Access", "hops": 2}, {"hash": "d" * 32, "identity": identity, "identity_verified": True}]
+        models = module.path_models(paths, {("destination", destination): {"label": "Known User"}})
+        self.assertEqual(models[0]["hash_type"], "Destination")
+        self.assertIsNone(models[0]["identity"])
+        self.assertEqual(models[1]["identity"], identity)
+        self.assertTrue(any(kind == "Destination path" for kind, _ in module.hash_context(destination, models, {})))
+        original_snapshot, original_management = module.snapshot, module.management
+        module.snapshot = lambda: {"paths": paths, "status": {"interfaces": []}}
+        module.management = lambda *args, **kwargs: {"capabilities": {"blackhole": True, "unblackhole": True, "drop_path": True}}
+        try:
+            page = self.client().get("/paths?q=Known").get_data(as_text=True)
+            self.assertIn("Prepare Recovery", page)
+            self.assertIn("Blackhole requires a verified identity hash", page)
+            rejected = self.client().post("/recovery", data={"csrf_token": "test-csrf", "identity": destination, "blackhole": "on"}, follow_redirects=True)
+            self.assertIn("known as a destination", rejected.get_data(as_text=True))
+        finally:
+            module.snapshot, module.management = original_snapshot, original_management
+
 
 if __name__ == "__main__":
     unittest.main()

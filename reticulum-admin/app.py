@@ -45,12 +45,14 @@ def db():
       CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, occurred_at INTEGER NOT NULL, kind TEXT NOT NULL, severity TEXT NOT NULL DEFAULT 'info', interface_name TEXT, remote_ip TEXT, message TEXT NOT NULL, detail_json TEXT);
       CREATE TABLE IF NOT EXISTS connections (id INTEGER PRIMARY KEY, connection_key TEXT NOT NULL, started_at INTEGER NOT NULL, disconnected_at INTEGER, remote_ip TEXT, remote_port INTEGER, interface_name TEXT, parent_interface_hash TEXT, runtime_interface_hash TEXT, ifac_netname TEXT, rx_bytes INTEGER, tx_bytes INTEGER, announces INTEGER, path_requests INTEGER, correlation TEXT, status TEXT NOT NULL DEFAULT 'active');
       CREATE TABLE IF NOT EXISTS labels (entity_type TEXT NOT NULL, entity_value TEXT NOT NULL, label TEXT NOT NULL, notes TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY(entity_type, entity_value));
+      CREATE TABLE IF NOT EXISTS label_history (id INTEGER PRIMARY KEY, entity_type TEXT NOT NULL, entity_value TEXT NOT NULL, old_label TEXT, old_notes TEXT, new_label TEXT, new_notes TEXT, changed_at INTEGER NOT NULL, admin TEXT NOT NULL, action TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS observer_state (state_key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS incidents (id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, admin TEXT NOT NULL, target_json TEXT NOT NULL, actions_json TEXT NOT NULL, preview_json TEXT NOT NULL, results_json TEXT, notes TEXT, status TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS config_changes (id INTEGER PRIMARY KEY, occurred_at INTEGER NOT NULL, admin TEXT NOT NULL, setting TEXT NOT NULL, old_value TEXT, new_value TEXT, snapshot_id TEXT, apply_method TEXT, result TEXT NOT NULL, rolled_back INTEGER NOT NULL DEFAULT 0, error TEXT);
       CREATE TABLE IF NOT EXISTS ui_preferences (pref_key TEXT PRIMARY KEY, pref_value TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS events_filter_idx ON events(occurred_at, kind, interface_name, remote_ip);
       CREATE INDEX IF NOT EXISTS connections_active_idx ON connections(connection_key, status);
+      CREATE INDEX IF NOT EXISTS label_history_entity_idx ON label_history(entity_type, entity_value, id DESC);
     """)
     # Keep existing persistent installations compatible with the operation-ID audit trail.
     try: con.execute("ALTER TABLE config_changes ADD COLUMN operation_id TEXT")
@@ -77,7 +79,7 @@ def csrf_token():
 
 @app.context_processor
 def common_values():
-    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.11")}
+    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.12")}
 
 def require_csrf():
     if not secrets.compare_digest(session.get("csrf", ""), request.form.get("csrf_token", "")): abort(400, "Invalid form token")
@@ -263,6 +265,81 @@ def ingest_snapshot():
 def labels():
     with db() as con: return {(x["entity_type"], x["entity_value"]): dict(x) for x in con.execute("SELECT * FROM labels")}
 
+def label_history(entity_type, entity_value):
+    with db() as con:
+        return [dict(row) for row in con.execute("SELECT * FROM label_history WHERE entity_type=? AND entity_value=? ORDER BY id DESC", (entity_type, entity_value))]
+
+def save_label_state(entity_type, entity_value, label, notes, action):
+    """Change one label only; this deliberately never observes Reticulum or calls management."""
+    started = time.monotonic()
+    with db() as con:
+        previous = con.execute("SELECT * FROM labels WHERE entity_type=? AND entity_value=?", (entity_type, entity_value)).fetchone()
+        old_label, old_notes = (previous["label"], previous["notes"]) if previous else (None, None)
+        if label is None:
+            con.execute("DELETE FROM labels WHERE entity_type=? AND entity_value=?", (entity_type, entity_value))
+        else:
+            con.execute("INSERT INTO labels(entity_type,entity_value,label,notes,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(entity_type,entity_value) DO UPDATE SET label=excluded.label,notes=excluded.notes,updated_at=excluded.updated_at", (entity_type, entity_value, label, notes, now()))
+        con.execute("INSERT INTO label_history(entity_type,entity_value,old_label,old_notes,new_label,new_notes,changed_at,admin,action) VALUES(?,?,?,?,?,?,?,?,?)", (entity_type, entity_value, old_label, old_notes, label, notes, now(), session.get("admin", "admin"), action))
+    elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+    app.logger.info("label action=%s entity_type=%s elapsed_ms=%s", action, entity_type, elapsed_ms)
+    audit("label_" + action, f"Label {action} for {entity_type} {entity_value}", detail={"elapsed_ms": elapsed_ms})
+    return elapsed_ms
+
+def verified_path_identity(path):
+    """An identity is actionable only when the data source explicitly marks it verified."""
+    identity = path.get("identity") or path.get("identity_hash") or path.get("associated_identity")
+    verified = path.get("identity_verified") is True or str(path.get("identity_relationship", "")).lower() == "verified"
+    return str(identity) if identity and verified else None
+
+def path_models(raw_paths, known, query=""):
+    rows = []
+    needle = query.lower().strip()
+    for raw in raw_paths or []:
+        if not isinstance(raw, dict):
+            continue
+        destination, transport = str(raw.get("hash") or ""), str(raw.get("via") or "")
+        identity = verified_path_identity(raw)
+        destination_label = known.get(("destination", destination), {}) if destination else {}
+        transport_label = known.get(("transport", transport), {}) if transport else {}
+        identity_label = known.get(("identity", identity), {}) if identity else {}
+        searchable = " ".join((destination, transport, str(raw.get("interface") or ""), destination_label.get("label", ""), transport_label.get("label", ""), identity_label.get("label", ""))).lower()
+        if needle and needle not in searchable:
+            continue
+        rows.append({**raw, "destination": destination, "transport": transport, "identity": identity,
+                     "destination_label": destination_label, "transport_label": transport_label,
+                     "identity_label": identity_label, "hash_type": "Destination", "identity_relationship": "Verified" if identity else "Unknown"})
+    return rows
+
+def hash_context(value, path_rows, known):
+    """Report every context actually observed. Hash length is deliberately never a classifier."""
+    contexts = []
+    for path in path_rows:
+        if path["destination"] == value: contexts.append(("Destination path", path))
+        if path["transport"] == value: contexts.append(("Transport identity", path))
+        if path.get("identity") == value: contexts.append(("Verified identity", path))
+    label_contexts = [(kind.title() + " label", {"label": row["label"]}) for (kind, entity), row in known.items() if entity == value]
+    return contexts + label_contexts
+
+def parse_blackhole_rows(result, known):
+    """rnpath output differs by Reticulum version; render structured JSON when available."""
+    if not result.get("ok"):
+        return []
+    raw = result.get("stdout") or ""
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if isinstance(parsed, dict):
+        parsed = parsed.get("blackholes") or parsed.get("entries") or []
+    rows = []
+    for item in parsed if isinstance(parsed, list) else []:
+        if not isinstance(item, dict): continue
+        identity = str(item.get("identity") or item.get("hash") or "")
+        rows.append({"identity": identity, "label": known.get(("identity", identity), {}).get("label"),
+                     "reason": item.get("reason"), "expiry": item.get("expiry") or item.get("expires"),
+                     "created": item.get("created") or item.get("added")})
+    return rows
+
 def management(path, body=None, timeout=None):
     token = os.environ.get("MANAGEMENT_TOKEN", ""); base = os.environ.get("MANAGEMENT_URL", "")
     if not token or not base: return {"ok": False, "error": "Management agent is not configured"}
@@ -447,7 +524,7 @@ def local_config_preview(change):
 
 def recovery_preview(form):
     target = {"identity":form.get("identity", "").strip(), "transport":form.get("transport", "").strip(), "destination":form.get("destination", "").strip(), "interface":form.get("interface", "").strip()}
-    actions = [key for key in ("blackhole","drop_via","drop_announces","attach","detach","reload") if form.get(key)]
+    actions = [key for key in ("blackhole","unblackhole","drop_path","drop_via","drop_announces","attach","detach","reload") if form.get(key)]
     return {"target":target, "actions":actions, "duration":form.get("duration", ""), "reason":form.get("reason", ""), "queue_warning": "Drop queued announces clears local queues globally." if "drop_announces" in actions else None}
 
 def system_info():
@@ -456,7 +533,7 @@ def system_info():
         values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line)
         memory = values.get("MemTotal", "Unavailable").strip()
     except OSError: pass
-    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.11"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
+    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.12"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
@@ -633,9 +710,38 @@ def clients():
 @login_required
 def save_label():
     require_csrf(); entity_type = request.form.get("entity_type", "ip"); entity_value = request.form.get("entity_value", "").strip(); label = request.form.get("label", "").strip(); notes = request.form.get("notes", "").strip()
-    if entity_type not in ("ip", "identity", "destination", "transport") or not entity_value or len(label) > 80: abort(400, "Invalid label")
-    with db() as con: con.execute("INSERT INTO labels VALUES(?,?,?,?,?) ON CONFLICT(entity_type,entity_value) DO UPDATE SET label=excluded.label,notes=excluded.notes,updated_at=excluded.updated_at", (entity_type, entity_value, label, notes, now()))
-    audit("label_changed", f"Label updated for {entity_type} {entity_value}"); flash("Label saved.", "success"); return redirect(request.referrer or url_for("clients"))
+    if entity_type not in ("ip", "identity", "destination", "transport") or not entity_value or not label or len(label) > 80 or len(notes) > 1000: abort(400, "Invalid label")
+    existing = labels().get((entity_type, entity_value))
+    save_label_state(entity_type, entity_value, label, notes, "update" if existing else "create")
+    flash("Label saved.", "success"); return redirect(request.form.get("return_to") or request.referrer or url_for("clients"))
+
+@app.post("/labels/clear")
+@login_required
+def clear_label():
+    require_csrf(); entity_type = request.form.get("entity_type", ""); entity_value = request.form.get("entity_value", "").strip()
+    if entity_type not in ("ip", "identity", "destination", "transport") or not entity_value: abort(400, "Invalid label")
+    if not labels().get((entity_type, entity_value)):
+        flash("No label exists to clear.", "error")
+    elif request.form.get("confirm") != "CLEAR LABEL":
+        flash("Type CLEAR LABEL to remove this label.", "error")
+    else:
+        save_label_state(entity_type, entity_value, None, None, "clear")
+        flash(f"Label cleared for {entity_type} {entity_value}.", "success")
+    return redirect(request.form.get("return_to") or request.referrer or url_for("paths"))
+
+@app.post("/labels/undo")
+@login_required
+def undo_label():
+    require_csrf(); entity_type = request.form.get("entity_type", ""); entity_value = request.form.get("entity_value", "").strip()
+    if entity_type not in ("ip", "identity", "destination", "transport") or not entity_value: abort(400, "Invalid label")
+    history = label_history(entity_type, entity_value)
+    if not history:
+        flash("No label change is available to undo.", "error")
+    else:
+        previous = history[0]
+        save_label_state(entity_type, entity_value, previous["old_label"], previous["old_notes"], "restore")
+        flash("Last label change undone.", "success")
+    return redirect(request.form.get("return_to") or request.referrer or url_for("paths"))
 
 @app.get("/timeline")
 @login_required
@@ -669,17 +775,46 @@ def logs():
 @login_required
 def paths():
     snap, _, _ = ingest_snapshot()
-    return render_template("paths.html", title="Paths", paths=snap.get("paths") or [], error=snap.get("path_error"), known=labels())
+    known = labels(); query = request.args.get("q", "")
+    paths = path_models(snap.get("paths") or [], known, query)
+    return render_template("paths.html", title="Paths", paths=paths, error=snap.get("path_error"), known=known, query=query)
+
+@app.get("/hashes/<value>")
+@login_required
+def hash_lookup(value):
+    snap, _, _ = ingest_snapshot(); known = labels(); rows = path_models(snap.get("paths") or [], known)
+    return render_template("hash_lookup.html", title="Hash Lookup", value=value, contexts=hash_context(value, rows, known), label=next((row for (kind, entity), row in known.items() if entity == value), None))
+
+@app.get("/hash-lookup")
+@login_required
+def hash_lookup_search():
+    value = request.args.get("q", "").strip()
+    if not value:
+        flash("Enter a hash to inspect.", "error")
+        return redirect(url_for("paths"))
+    return redirect(url_for("hash_lookup", value=value))
 
 @app.route("/recovery", methods=["GET", "POST"])
 @login_required
 def recovery():
     capabilities = management("/capabilities").get("capabilities", {})
     if request.method == "POST":
-        require_csrf(); preview = recovery_preview(request.form); session["recovery_preview"] = preview
+        require_csrf(); preview = recovery_preview(request.form)
+        snap, _, _ = ingest_snapshot(); known = labels(); rows = path_models(snap.get("paths") or [], known)
+        contexts = hash_context(preview["target"]["identity"], rows, known) if preview["target"]["identity"] else []
+        if "blackhole" in preview["actions"] and preview["target"]["identity"] and any(kind == "Destination path" for kind, _ in contexts) and not any(kind == "Verified identity" for kind, _ in contexts):
+            flash("This hash is currently known as a destination, not a verified identity. Blackholing requires an identity hash.", "error")
+            return redirect(url_for("recovery", **preview["target"]))
+        preview["labels"] = {key: known.get((kind, value), {}).get("label") for key, kind, value in (("identity", "identity", preview["target"]["identity"]), ("transport", "transport", preview["target"]["transport"]), ("destination", "destination", preview["target"]["destination"])) if value}
+        session["recovery_preview"] = preview
         if not preview["actions"]: flash("Select at least one recovery action.", "error"); return redirect(url_for("recovery"))
         return render_template("recovery_preview.html", title="Recovery Preview", preview=preview, capabilities=capabilities)
-    return render_template("recovery.html", title="Incident Recovery", capabilities=capabilities)
+    target = {key: request.args.get(key, "").strip() for key in ("identity", "transport", "destination", "interface")}
+    snap, _, _ = ingest_snapshot(); known = labels(); rows = path_models(snap.get("paths") or [], known)
+    warnings = []
+    if target["identity"] and any(kind == "Destination path" for kind, _ in hash_context(target["identity"], rows, known)):
+        warnings.append("This hash is known as a destination, not a verified identity. Blackholing requires an identity hash.")
+    return render_template("recovery.html", title="Incident Recovery", capabilities=capabilities, target=target, labels=known, warnings=warnings)
 
 @app.post("/recovery/apply")
 @login_required
@@ -689,8 +824,8 @@ def recovery_apply():
     if "drop_announces" in preview["actions"] and request.form.get("typed_drop") != "DROP ANNOUNCES": abort(400, "Typed confirmation required")
     if "detach" in preview["actions"] and request.form.get("typed_detach") != "DETACH": abort(400, "Typed confirmation required")
     results=[]; status="Completed"
-    op_map={"blackhole":"blackhole", "drop_via":"drop_via", "drop_announces":"drop_announces", "attach":"attach", "detach":"detach", "reload":"reload"}
-    payloads={"blackhole":{"identity":preview["target"]["identity"],"duration":preview["duration"],"reason":preview["reason"]},"drop_via":{"transport":preview["target"]["transport"]},"drop_announces":{},"attach":{"interface":preview["target"]["interface"]},"detach":{"interface":preview["target"]["interface"]},"reload":{"interface":preview["target"]["interface"]}}
+    op_map={"blackhole":"blackhole", "unblackhole":"unblackhole", "drop_path":"drop_path", "drop_via":"drop_via", "drop_announces":"drop_announces", "attach":"attach", "detach":"detach", "reload":"reload"}
+    payloads={"blackhole":{"identity":preview["target"]["identity"],"duration":preview["duration"],"reason":preview["reason"]},"unblackhole":{"identity":preview["target"]["identity"]},"drop_path":{"destination":preview["target"]["destination"]},"drop_via":{"transport":preview["target"]["transport"]},"drop_announces":{},"attach":{"interface":preview["target"]["interface"]},"detach":{"interface":preview["target"]["interface"]},"reload":{"interface":preview["target"]["interface"]}}
     for action in preview["actions"]:
         result=management("/execute", {"operation":op_map[action],"payload":payloads[action]}); results.append(result)
         audit("recovery_"+action, f"Recovery {action}: {'succeeded' if result.get('ok') else 'failed'}", "info" if result.get("ok") else "error", preview["target"].get("interface") or None, detail={"target":preview["target"],"result":result})
@@ -708,7 +843,8 @@ def incident_history():
 @login_required
 def blackholes():
     result=management("/execute", {"operation":"list_blackholes","payload":{}})
-    return render_template("blackholes.html", title="Blackholes", result=result, known=labels())
+    known = labels()
+    return render_template("blackholes.html", title="Blackholes", result=result, known=known, rows=parse_blackhole_rows(result, known))
 
 @app.get("/system")
 @login_required
