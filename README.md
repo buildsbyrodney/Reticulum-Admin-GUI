@@ -7,6 +7,12 @@ A Docker-based web administration and observability interface for Reticulum node
 **Discovery** is about learning connectable Reticulum interfaces advertised by other nodes; it is separate from ordinary destination announces. The Discovery page exposes the installed Reticulum 1.5.7 settings through the existing reviewed configuration lifecycle:
 
 - `discover_interfaces` — listen for advertised interfaces. It remains off until an operator enables it.
+
+Interface Discovery in the managed `rnsd` image requires LXMF. The image pins
+`lxmf==0.9.6` alongside `rns==1.5.7`, checks both imports while building, and
+reports the actual LXMF runtime capability to the admin UI. If LXMF is not
+available, Discovery cannot be enabled; this avoids applying a configuration
+that rnsd cannot start.
 - `autoconnect_discovered_interfaces` — bounded automatic connection count. `0` means off.
 - trusted discovery identity sources, preferred auto-connect mode, unverified implementation policy, and an optional discovery stamp requirement.
 - TCP Server discovery fields: `discoverable`, `discovery_name`, `reachable_on`, `announce_interval`, `publish_ifac`, and encryption only when a pre-existing Reticulum network identity makes it available.

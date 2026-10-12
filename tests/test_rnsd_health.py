@@ -9,6 +9,19 @@ spec = importlib.util.spec_from_file_location("rnsd_health", ROOT / "rnsd" / "ch
 health = importlib.util.module_from_spec(spec); spec.loader.exec_module(health)
 
 class RnsdHealthTests(unittest.TestCase):
+    def test_launcher_retries_shared_readiness_inside_one_managed_lifecycle(self):
+        launcher = (ROOT / "rnsd" / "start-rnsd.sh").read_text(encoding="utf-8")
+        probe = (ROOT / "rnsd" / "check_shared_instance.py").read_text(encoding="utf-8")
+        # A failed candidate must be stopped before retrying. This avoids the
+        # previous Docker-restart loop, where a Pi could outlast the management
+        # agent's verification deadline before its third candidate was ready.
+        self.assertIn('CANDIDATE_READY_TRIES="${RNSD_CANDIDATE_READY_TRIES:-8}"', launcher)
+        self.assertIn('CANDIDATE_ATTEMPTS="${RNSD_CANDIDATE_ATTEMPTS:-3}"', launcher)
+        self.assertIn("wait_for_no_shared_instance()", launcher)
+        self.assertIn("stop_candidate()", launcher)
+        self.assertIn('Retrying shared-instance startup', launcher)
+        self.assertIn('RNS_SHARED_PROBE_TIMEOUT", "1"', probe)
+
     def snapshot(self, root, generation=7, ready=True, error=None, collected="2026-10-10T05:00:00+00:00"):
         status=root/"admin-status"; status.mkdir(exist_ok=True); (status/"rnsd.generation").write_text(str(generation))
         (status/"snapshot.json").write_text(json.dumps({"collected_at":collected,"rnsd_generation":generation,"reticulum_ready":ready,"status_error":error,"status":{"interfaces":[{"name":"Shared Instance[rns/default]"}]}}))

@@ -95,9 +95,13 @@ def public_model(text=None):
         global_model[key] = global_settings.get(key)
     # The path to a network identity is intentionally not exposed through the
     # API. Its presence only gates the version-supported encryption control.
+    discovery = discovery_dependency_capability()
     return {"hash": config_hash(text), "global": global_model, "interfaces": interfaces,
             "version": version, "discovery_capabilities": {
-                "supported": version_at_least(version, (1, 5, 0)),
+                "supported": version_at_least(version, (1, 5, 0)) and discovery["available"],
+                "lxmf_available": discovery["available"],
+                "lxmf_version": discovery.get("version"),
+                "reason": None if version_at_least(version, (1, 5, 0)) and discovery["available"] else discovery["reason"],
                 "network_identity_configured": bool(global_settings.get("network_identity")),
                 "manual_connect": False,
             }}
@@ -108,6 +112,21 @@ def version_at_least(value, minimum):
         return parts >= minimum
     except (TypeError, ValueError):
         return False
+
+def discovery_dependency_capability():
+    """Read the rnsd-owned runtime dependency check, never infer from version."""
+    try:
+        data = json.loads((STATUS_DIR / "capabilities.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"available": False, "version": None, "reason": "LXMF capability information is unavailable from rnsd."}
+    if data.get("lxmf_available") is True:
+        return {"available": True, "version": data.get("lxmf_version"), "reason": None}
+    return {"available": False, "version": None, "reason": "Discovery requires LXMF in the managed rnsd runtime."}
+
+def require_discovery_dependency():
+    capability = discovery_dependency_capability()
+    if not capability["available"]:
+        raise ValueError(capability["reason"])
 
 def validate_hash_list(value):
     if not isinstance(value, str):
@@ -137,7 +156,9 @@ def validate_global_changes(changes):
     for setting, value in changes.items():
         if setting == "enable_transport" and isinstance(value, bool): continue
         if setting == "loglevel" and str(value) in LOG_LEVELS: continue
-        if setting == "discover_interfaces" and isinstance(value, bool): continue
+        if setting == "discover_interfaces" and isinstance(value, bool):
+            if value: require_discovery_dependency()
+            continue
         if setting == "interface_discovery_sources":
             changes[setting] = validate_hash_list(value); continue
         if setting == "autoconnect_discovered_interfaces" and isinstance(value, int) and 0 <= value <= 4096: continue
@@ -181,6 +202,8 @@ def validate_change(change, text=None):
             if key in ("bootstrap_only", "discoverable", "publish_ifac", "discovery_encrypt") and not isinstance(value, bool): raise ValueError(f"{key} must be boolean")
             if key == "announce_interval" and (not isinstance(value, int) or not 5 <= value <= 10080): raise ValueError("Discovery announcement interval must be between 5 and 10080 minutes")
             if key == "reachable_on": validate_reachable_on(value)
+            if key in ("discoverable", "publish_ifac", "discovery_encrypt") and value:
+                require_discovery_dependency()
         effective = effective_settings(section, changes)
         if str(effective.get("publish_ifac", "No")).lower() in ("yes", "true", "1"):
             if str(effective.get("discoverable", "No")).lower() not in ("yes", "true", "1"):

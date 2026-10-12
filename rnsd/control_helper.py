@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import time
+import importlib.metadata
 from pathlib import Path
 
 CONFIG = Path(sys.argv[1])
@@ -66,7 +67,12 @@ def write_capabilities():
     for binary in ("rnpath", "rnstatus"):
         try: help_text += subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=5).stdout
         except OSError: pass
-    atomic_json(STATUS / "capabilities.json", {"blackhole":"--blackhole" in help_text, "unblackhole":"--unblackhole" in help_text, "drop_path":"--drop" in help_text, "drop_via_transport":"--drop-via" in help_text, "drop_announces":"--drop-announces" in help_text, "attach_interface":"--attach" in help_text, "detach_interface":"--detach" in help_text, "reload_interface":"--reload" in help_text})
+    try:
+        import LXMF  # noqa: F401 - capability must reflect an actual import
+        lxmf_available, lxmf_version = True, importlib.metadata.version("lxmf")
+    except (ImportError, importlib.metadata.PackageNotFoundError):
+        lxmf_available, lxmf_version = False, None
+    atomic_json(STATUS / "capabilities.json", {"blackhole":"--blackhole" in help_text, "unblackhole":"--unblackhole" in help_text, "drop_path":"--drop" in help_text, "drop_via_transport":"--drop-via" in help_text, "drop_announces":"--drop-announces" in help_text, "attach_interface":"--attach" in help_text, "detach_interface":"--detach" in help_text, "reload_interface":"--reload" in help_text, "lxmf_available":lxmf_available, "lxmf_version":lxmf_version, "interface_discovery":lxmf_available})
 
 def execute(request):
     operation_id, action, payload = request.get("operation_id"), request.get("action"), request.get("payload") or {}

@@ -2,8 +2,8 @@
 # Stable public release metadata. Payloads are always verified before extraction.
 PROJECT_OWNER="buildsbyrodney"
 PROJECT_REPO="Reticulum-Admin-GUI"
-PROJECT_VERSION="0.5.3"
-PROJECT_TAG="v0.5.3"
+PROJECT_VERSION="0.5.4"
+PROJECT_TAG="v0.5.4"
 ARCHIVE_NAME="reticulum-admin-${PROJECT_VERSION}.tar.gz"
 CHECKSUM_NAME="${ARCHIVE_NAME}.sha256"
 PROJECT_RELEASE_URL="https://github.com/buildsbyrodney/Reticulum-Admin-GUI/releases/download/${PROJECT_TAG}/${ARCHIVE_NAME}"
@@ -247,6 +247,20 @@ update_local() {
   else
     printf '\nRETICULUM_ADMIN_VERSION=%s\n' "$APP_VERSION" >> "$ROOT/.env"
   fi
+  # Preserve explicit operator tuning, but move values that exactly match the
+  # prior shipped defaults to the coordinated v0.5.4 timing hierarchy.
+  upgrade_timeout_default() {
+    key=$1 old_value=$2 new_value=$3
+    if grep -q "^$key=" "$ROOT/.env"; then
+      current_value=$(sed -n "s/^$key=//p" "$ROOT/.env" | tail -n 1)
+      if [ "$current_value" = "$old_value" ]; then
+        sed "s/^$key=$old_value$/$key=$new_value/" "$ROOT/.env" > "$ROOT/.env.timeout-tmp"
+        mv "$ROOT/.env.timeout-tmp" "$ROOT/.env"
+      fi
+    fi
+  }
+  upgrade_timeout_default RESTART_HEALTH_TIMEOUT 35 70
+  upgrade_timeout_default MANAGEMENT_HTTP_TIMEOUT 100 180
   rm -f "$TMP" "$SUM"
   docker_cmd compose up -d --build
   echo "Updated to $PROJECT_TAG. Persistent state backed up in $BACKUP."

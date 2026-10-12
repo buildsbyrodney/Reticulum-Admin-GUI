@@ -12,6 +12,8 @@ class ConfigurationTests(unittest.TestCase):
         self.old=(cfg.CONFIG,cfg.ROOT,cfg.SNAPSHOTS,cfg.RESTART_REQUEST,cfg.STATUS_DIR,cfg.GENERATION_FILE,cfg.SNAPSHOT_FILE,cfg.OPERATIONS)
         cfg.ROOT=root; cfg.CONFIG=root/"config"; cfg.SNAPSHOTS=root/"admin-config-snapshots"; cfg.RESTART_REQUEST=root/"admin-control"/"restart-request"; cfg.STATUS_DIR=root/"admin-status"; cfg.GENERATION_FILE=cfg.STATUS_DIR/"rnsd.generation"; cfg.SNAPSHOT_FILE=cfg.STATUS_DIR/"snapshot.json"; cfg.OPERATIONS=root/"admin-config-operations"
         cfg.CONFIG.write_text(SAMPLE); cfg.STATUS_DIR.mkdir(); cfg.GENERATION_FILE.write_text("5")
+        # Discovery is gated by the rnsd-owned LXMF import check in production.
+        (cfg.STATUS_DIR / "capabilities.json").write_text('{"lxmf_available": true, "lxmf_version": "0.9.6"}')
     def tearDown(self):
         cfg.CONFIG,cfg.ROOT,cfg.SNAPSHOTS,cfg.RESTART_REQUEST,cfg.STATUS_DIR,cfg.GENERATION_FILE,cfg.SNAPSHOT_FILE,cfg.OPERATIONS=self.old; self.temp.cleanup()
     def test_known_change_preserves_unknown_lines_and_redacts_secret(self):
@@ -161,6 +163,19 @@ class ConfigurationTests(unittest.TestCase):
         self.assertIn("autoconnect_discovered_interfaces = 2", candidate)
         self.assertIn("interface_discovery_sources = 0123456789abcdef0123456789abcdef", candidate)
         self.assertIn("custom_global = retain", candidate)
+
+    def test_discovery_cannot_be_enabled_without_runtime_lxmf(self):
+        (cfg.STATUS_DIR / "capabilities.json").write_text('{"lxmf_available": false}')
+        with self.assertRaisesRegex(ValueError, "requires LXMF"):
+            cfg.edit_text(SAMPLE, {"kind":"global_batch", "changes":{"discover_interfaces":True}})
+
+    def test_discovery_capability_comes_from_rnsd_status(self):
+        (cfg.STATUS_DIR / "capabilities.json").write_text('{"lxmf_available": false}')
+        self.assertFalse(cfg.public_model(SAMPLE)["discovery_capabilities"]["supported"])
+        (cfg.STATUS_DIR / "capabilities.json").write_text('{"lxmf_available": true, "lxmf_version": "0.9.6"}')
+        capability = cfg.public_model(SAMPLE)["discovery_capabilities"]
+        self.assertTrue(capability["supported"])
+        self.assertEqual(capability["lxmf_version"], "0.9.6")
 
     def test_discovery_interface_controls_are_validated(self):
         change = {"kind":"interface", "name":"Public TCP", "changes":{"discoverable":True, "discovery_name":"Trusted Site", "reachable_on":"node.example.net", "announce_interval":60, "publish_ifac":True}}

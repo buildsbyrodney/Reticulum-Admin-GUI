@@ -52,6 +52,14 @@ grep -F 'TMP=${TMPDIR:-/tmp}/$ARCHIVE_NAME' "$ROOT/install.sh" >/dev/null
 # identify the newly unpacked release rather than a stale .env value.
 grep -F 'RETICULUM_ADMIN_VERSION=$APP_VERSION' "$ROOT/install.sh" >/dev/null
 grep -F 'sed "s/^RETICULUM_ADMIN_VERSION=.*/RETICULUM_ADMIN_VERSION=$APP_VERSION/"' "$ROOT/install.sh" >/dev/null
+# Updating retains intentional tuning, but migrates the former shipped restart
+# defaults so an old .env cannot reintroduce the short verification budget.
+grep -F 'upgrade_timeout_default RESTART_HEALTH_TIMEOUT 35 70' "$ROOT/install.sh" >/dev/null
+grep -F 'upgrade_timeout_default MANAGEMENT_HTTP_TIMEOUT 100 180' "$ROOT/install.sh" >/dev/null
+# Discovery's runtime dependency is explicitly pinned for the rnsd build;
+# it must not depend on whatever an indirect package happens to install.
+grep -F 'LXMF_VERSION=0.9.6' "$ROOT/.env.example" >/dev/null
+grep -F 'LXMF_VERSION: ${LXMF_VERSION:-0.9.6}' "$ROOT/compose.yaml" >/dev/null
 # Host-networked rnsd intentionally refuses Docker Desktop/WSL semantics.
 grep -F 'native Linux Docker Engine' "$ROOT/install.sh" >/dev/null
 grep -F 'Docker Desktop and WSL are not supported' "$ROOT/install.sh" >/dev/null

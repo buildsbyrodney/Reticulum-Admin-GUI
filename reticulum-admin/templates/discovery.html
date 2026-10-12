@@ -3,7 +3,7 @@
 <h1>Discovery</h1>
 <p>Reticulum can discover connectable interfaces announced by other nodes. This can reduce the need to manually configure every TCP connection.</p>
 <p class="muted">Discovery is different from ordinary Reticulum destination announces. It is specifically about learning where connectable Reticulum interfaces are available.</p>
-{% if not capabilities.supported %}<p class="flash error">Interface discovery is not supported by the installed Reticulum version.</p>{% else %}
+{% if not capabilities.supported %}<p class="flash error">{{ capabilities.reason or 'Interface discovery is not supported by the installed Reticulum version.' }}</p>{% else %}
 <form method="post" class="card"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <h2>Local Interface Discovery</h2>
   <label>Interface Discovery<select name="discover_interfaces"><option value="no" {% if not config.global.get('discover_interfaces') or config.global.get('discover_interfaces')|lower in ['no','false','0'] %}selected{% endif %}>Disabled</option><option value="yes" {% if config.global.get('discover_interfaces')|lower in ['yes','true','1'] %}selected{% endif %}>Enabled</option></select></label>
