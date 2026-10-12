@@ -93,7 +93,7 @@ def csrf_token():
 
 @app.context_processor
 def common_values():
-    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.5.1")}
+    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.5.2")}
 
 def require_csrf():
     if not secrets.compare_digest(session.get("csrf", ""), request.form.get("csrf_token", "")): abort(400, "Invalid form token")
@@ -496,19 +496,32 @@ def discovered_interface_models(snap, observed=None, config=None):
 
 def discovery_form_change(form, config):
     """Translate the narrow Discovery form into only supported config keys."""
+    def text_value(name):
+        # Management intentionally represents unset optional keys as null. A
+        # HTML form must turn that into an empty optional value, not the text
+        # "None", which would otherwise look like an invalid identity hash.
+        value = str(form.get(name, "") or "").strip()
+        return "" if value.lower() in ("none", "null") else value
+    limit_text = text_value("autoconnect_discovered_interfaces") or "0"
+    if not limit_text.isdigit() or not 0 <= int(limit_text) <= 4096:
+        raise ValueError("Auto-connect limit must be a whole number from 0 to 4096.")
     changes = {
         "discover_interfaces": form.get("discover_interfaces") == "yes",
-        "autoconnect_discovered_interfaces": int(form.get("autoconnect_discovered_interfaces", "0") or 0),
+        "autoconnect_discovered_interfaces": int(limit_text),
         "autoconnect_unverified_implementations": form.get("autoconnect_unverified_implementations") == "yes",
     }
-    mode = form.get("autoconnect_interface_mode", "").strip()
-    sources = form.get("interface_discovery_sources", "").strip()
-    stamp = form.get("required_discovery_value", "").strip()
+    mode = text_value("autoconnect_interface_mode")
+    sources = text_value("interface_discovery_sources")
+    stamp = text_value("required_discovery_value")
+    if sources and any(not re.fullmatch(r"[0-9a-fA-F]{32}", source) for source in re.split(r"[\s,]+", sources) if source):
+        raise ValueError("Each trusted discovery source must be a 32-character hexadecimal Reticulum identity hash.")
+    if stamp and (not stamp.isdigit() or not 0 <= int(stamp) <= 65535):
+        raise ValueError("Required discovery stamp value must be a whole number from 0 to 65535.")
     if mode: changes["autoconnect_interface_mode"] = mode
     if sources or ((config.get("global") or {}).get("interface_discovery_sources")):
         changes["interface_discovery_sources"] = sources
     if stamp or ((config.get("global") or {}).get("required_discovery_value")):
-        changes["required_discovery_value"] = stamp
+        changes["required_discovery_value"] = int(stamp) if stamp else 0
     return {"kind": "global_batch", "changes": changes}
 
 def make_interface_change(form):
@@ -642,7 +655,7 @@ def system_info():
         values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line)
         memory = values.get("MemTotal", "Unavailable").strip()
     except OSError: pass
-    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.5.1"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
+    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.5.2"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
@@ -1091,7 +1104,17 @@ def configuration_apply():
     result.setdefault("operation_id", item["operation_id"])
     if result.get("ok"): update_config_view_cache(item["change"])
     record_config_change(result, item["change"])
-    flash("Configuration applied and restart verified." if result.get("ok") and result.get("restart_verified") else "Configuration applied." if result.get("ok") else "The management operation did not return a result in time. Reticulum may still have applied the change; check current status before retrying." if result.get("unknown") else "Configuration failed and was rolled back." if result.get("rolled_back") else "Configuration failed; recovery needs attention.", "success" if result.get("ok") else "error")
+    if result.get("ok"):
+        message, category = ("Configuration applied and restart verified." if result.get("restart_verified") else "Configuration applied."), "success"
+    elif result.get("unknown"):
+        message, category = "The management operation did not return a result in time. Reticulum may still have applied the change; check current status before retrying.", "error"
+    elif result.get("rolled_back"):
+        message, category = "Configuration failed and was rolled back.", "error"
+    else:
+        # Validation errors happen before a candidate is written. They are
+        # operator-actionable and must not be disguised as recovery trouble.
+        message, category = result.get("error") or "Configuration failed; recovery needs attention.", "error"
+    flash(message, category)
     return redirect(item.get("return_to") or url_for("configuration"))
 
 @app.route("/snapshots", methods=["GET", "POST"])
