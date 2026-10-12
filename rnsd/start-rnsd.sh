@@ -144,6 +144,9 @@ while true; do
     : > "$CANDIDATE_MARKER"
     rnsd --config "$CONFIG_DIR" --service &
     RNSD_PID=$!
+    # The marker doubles as a narrow diagnostic hook: it exists only while a
+    # candidate is being verified and records that candidate's PID.
+    printf '%s\n' "$RNSD_PID" > "$CANDIDATE_MARKER"
     log "Waiting for shared instance"
     if wait_shared; then
       candidate_ready=yes
