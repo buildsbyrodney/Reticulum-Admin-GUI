@@ -342,6 +342,8 @@ class LiveRnstatusTests(unittest.TestCase):
         module.ingest_snapshot = lambda: ({"paths": paths, "path_error": None}, [], [])
         module.management = lambda *args, **kwargs: {"capabilities": {"blackhole": True, "unblackhole": True, "drop_path": True}}
         try:
+            with module.db() as con:
+                con.execute("INSERT INTO labels(entity_type,entity_value,label,notes,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(entity_type,entity_value) DO UPDATE SET label=excluded.label", ("destination", destination, "Known User", "", 0))
             page = self.client().get("/paths?q=Known").get_data(as_text=True)
             self.assertIn("Prepare Recovery", page)
             self.assertIn("Blackhole requires a verified identity hash", page)
