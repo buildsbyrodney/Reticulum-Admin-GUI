@@ -2,8 +2,8 @@
 # Stable public release metadata. Payloads are always verified before extraction.
 PROJECT_OWNER="buildsbyrodney"
 PROJECT_REPO="Reticulum-Admin-GUI"
-PROJECT_VERSION="0.4.0"
-PROJECT_TAG="v0.4.0"
+PROJECT_VERSION="0.4.1"
+PROJECT_TAG="v0.4.1"
 ARCHIVE_NAME="reticulum-admin-${PROJECT_VERSION}.tar.gz"
 CHECKSUM_NAME="${ARCHIVE_NAME}.sha256"
 PROJECT_RELEASE_URL="https://github.com/buildsbyrodney/Reticulum-Admin-GUI/releases/download/${PROJECT_TAG}/${ARCHIVE_NAME}"

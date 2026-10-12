@@ -54,7 +54,22 @@ class EchoBot:
         status = snapshot.get("status") or {}; interfaces = status.get("interfaces") or []
         return {"transport": "On" if bool(status.get("transport_instance") or status.get("transport_enabled")) else "Off", "paths": len(snapshot.get("paths") or []), "interfaces": sum(1 for row in interfaces if row.get("status") is True), "clients": sum((row.get("clients") or 0) for row in interfaces)}
     def write_status(self, ready=False, error=None):
-        atomic_json(STATUS / "status.json", {"running": True, "shared_instance_connected": ready, "lxmf_router_ready": bool(self.router), "destination": self.destination.hash.hex() if self.destination else None, "identity": self.identity.hash.hex() if getattr(self, "identity", None) else None, "error": error, **self.counters})
+        """Report readiness separately from the supervised process being alive.
+
+        A container can be running while it is deliberately waiting for rnsd.
+        Calling that state "Running" in the GUI was misleading during startup.
+        """
+        atomic_json(STATUS / "status.json", {
+            "running": bool(ready),
+            "process_running": True,
+            "state": "ready" if ready else "waiting",
+            "shared_instance_connected": ready,
+            "lxmf_router_ready": bool(self.router),
+            "destination": self.destination.hash.hex() if self.destination else None,
+            "identity": self.identity.hash.hex() if getattr(self, "identity", None) else None,
+            "error": error,
+            **self.counters,
+        })
     def announce(self, reason):
         self.router.announce(self.destination.hash); self.counters["last_announce"] = int(time.time()); self.activity(f"{reason} announce sent")
     def received(self, message):
@@ -77,7 +92,11 @@ class EchoBot:
         while not Path("/reticulum/admin-status/rnsd.ready").exists():
             self.write_status(False, "Waiting for managed Reticulum shared instance")
             time.sleep(2)
-        RNS.Reticulum(configdir="/reticulum") # joins managed rnsd; never creates the shared master while it is ready
+        # This service is an RNS client only. ``require_shared_instance`` is
+        # essential: without it Reticulum falls back to becoming a master when
+        # the shared socket cannot be reached, which would reopen every rnsd
+        # interface from the bot container.
+        RNS.Reticulum(configdir="/reticulum", require_shared_instance=True)
         identity_path = STATE / "identity"
         self.identity = RNS.Identity.from_file(str(identity_path)) if identity_path.exists() else RNS.Identity()
         if not identity_path.exists(): self.identity.to_file(str(identity_path))
@@ -100,7 +119,18 @@ class EchoBot:
                 self.write_status(False, "Bot runtime error"); time.sleep(5)
 
 if __name__ == "__main__":
-    try: EchoBot().run()
+    try:
+        EchoBot().run()
     except Exception as error:
-        atomic_json(STATUS / "status.json", {"running": False, "shared_instance_connected": False, "lxmf_router_ready": False, "error": "Bot startup failed"})
+        # Never include config or message data here. The exception text is
+        # retained only so the authenticated admin can distinguish a shared
+        # instance connection problem from a generic waiting state.
+        atomic_json(STATUS / "status.json", {
+            "running": False,
+            "process_running": False,
+            "state": "failed",
+            "shared_instance_connected": False,
+            "lxmf_router_ready": False,
+            "error": f"Bot startup failed: {error}",
+        })
         raise

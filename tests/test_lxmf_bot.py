@@ -39,4 +39,22 @@ class EchoBotTests(unittest.TestCase):
             identity.write_bytes(b"persistent-test-identity")
             self.assertEqual(identity.read_bytes(), b"persistent-test-identity")
 
+    def test_bot_requires_an_existing_shared_instance(self):
+        source = BOT_PATH.read_text(encoding="utf-8")
+        self.assertIn('RNS.Reticulum(configdir="/reticulum", require_shared_instance=True)', source)
+
+    def test_waiting_status_is_not_reported_as_ready(self):
+        with tempfile.TemporaryDirectory() as root:
+            old = bot.STATUS
+            bot.STATUS = Path(root)
+            try:
+                instance = bot.EchoBot()
+                instance.write_status(False, "Waiting for managed Reticulum shared instance")
+                state = json.loads((bot.STATUS / "status.json").read_text())
+                self.assertFalse(state["running"])
+                self.assertTrue(state["process_running"])
+                self.assertEqual(state["state"], "waiting")
+            finally:
+                bot.STATUS = old
+
 if __name__ == "__main__": unittest.main()
