@@ -6,7 +6,7 @@ A Docker-based web administration and observability interface for Reticulum node
 
 The **Diagnostics** page separates network-facing configuration checks from Reticulum runtime observations. It includes per-interface diagnostics, shared-instance health, and path inspection. A successful TCP-level check alone does not prove that Reticulum or IFAC is working; the page reports those layers separately.
 
-`lxmf-test-bot` is a separate, non-administrative service with its own persistent LXMF identity. It waits for the managed rnsd shared instance before connecting, never has the management token, Docker socket, admin database, or configuration-write access. Its identity and LXMF destination persist under `data/bot/`.
+`lxmf-test-bot` is a separate, non-administrative service with its own persistent LXMF identity. It uses Linux host networking solely to attach to the same local Reticulum shared-instance socket as `rnsd`; it publishes no ports and never has the management token, Docker socket, admin database, or configuration-write access. Its identity and LXMF destination persist under `data/bot/`.
 
 Open **Diagnostics → Test Echo Bot**, copy or announce its LXMF destination, then message it from MeshChat:
 

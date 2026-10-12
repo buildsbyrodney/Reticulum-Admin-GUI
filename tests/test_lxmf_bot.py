@@ -57,4 +57,11 @@ class EchoBotTests(unittest.TestCase):
             finally:
                 bot.STATUS = old
 
+    def test_bot_uses_the_rnsd_host_network_namespace_without_exposing_ports(self):
+        compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+        service = compose.split("  lxmf-test-bot:", 1)[1]
+        self.assertIn("network_mode: host", service)
+        self.assertNotIn("ports:", service)
+        self.assertIn("./data/reticulum:/reticulum:ro", service)
+
 if __name__ == "__main__": unittest.main()

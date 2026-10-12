@@ -11,7 +11,7 @@ services:
     network_mode: host
     environment:
       SERVER_TIMEZONE: ${SERVER_TIMEZONE:-America/Chicago}
-      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.4.1}
+      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.4.2}
       HOST_ARCH: ${HOST_ARCH:-unknown}
       HOST_OS: ${HOST_OS:-unknown}
       INSTALL_DOCKER_VERSION: ${INSTALL_DOCKER_VERSION:-unknown}
@@ -37,7 +37,7 @@ services:
     restart: unless-stopped
     environment:
       MANAGEMENT_TOKEN: ${MANAGEMENT_TOKEN:?Set MANAGEMENT_TOKEN in .env}
-      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.4.1}
+      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.4.2}
       RETICULUM_DIR: /reticulum
       # Observer-based health and this bounded restart budget fit inside the explicit
       # 90-second agent worker and 100-second web request budgets.
@@ -62,7 +62,7 @@ services:
       SERVER_TIMEZONE: ${SERVER_TIMEZONE:-America/Chicago}
       MANAGEMENT_URL: http://management-agent:8081
       MANAGEMENT_TOKEN: ${MANAGEMENT_TOKEN:?Set MANAGEMENT_TOKEN in .env}
-      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.4.1}
+      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.4.2}
       HOST_ARCH: ${HOST_ARCH:-unknown}
       HOST_OS: ${HOST_OS:-unknown}
       INSTALL_DOCKER_VERSION: ${INSTALL_DOCKER_VERSION:-unknown}
@@ -85,6 +85,10 @@ services:
     depends_on:
       rnsd:
         condition: service_started
+    # Reticulum's local shared-instance socket is namespace-local. The bot
+    # must share rnsd's host network namespace to attach as a client, but it
+    # publishes no ports and still has only a read-only Reticulum mount.
+    network_mode: host
     environment:
       BOT_STATE_DIR: /bot
       BOT_STATUS_DIR: /status
