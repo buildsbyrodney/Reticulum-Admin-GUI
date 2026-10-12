@@ -64,7 +64,7 @@ elapsed=$(( $(date +%s) - $(cat "$probe_dir/candidate-started") ))
 test "$elapsed" -ge 18
 test "$(cat "$probe_dir/generation-before")" = 0
 candidate_pid=$(cat "$probe_dir/candidate-pid")
-docker exec "$container" kill -0 "$candidate_pid"
+docker exec "$container" sh -c "kill -0 $candidate_pid"
 test "$(docker exec "$container" cat /root/.reticulum/admin-status/rnsd.generation)" = 1
 docker logs "$container" | grep -F 'Shared instance verified'
 if docker logs "$container" | grep -Fq 'candidate did not become shared instance'; then
