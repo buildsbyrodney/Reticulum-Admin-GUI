@@ -23,13 +23,26 @@ POLL_INTERVAL = float(os.environ.get("RESTART_POLL_INTERVAL", "0.75"))
 SNAPSHOT_FILE = STATUS_DIR / "snapshot.json"
 LOG = logging.getLogger("reticulum_admin.configuration")
 MODES = {"full", "point_to_point", "access_point", "roaming", "boundary", "gateway", "internal"}
+DISCOVERY_MODES = {"full", "pointtopoint", "accesspoint", "roaming", "boundary", "gateway", "internal"}
 LOG_LEVELS = {str(n) for n in range(0, 8)}
 SECRET_KEYS = {"passphrase", "ifac_passphrase", "network_key"}
 COMMON = {"enabled", "mode", "network_name", "passphrase", "ifac_size"}
+DISCOVERY_GLOBAL_FIELDS = {
+    "discover_interfaces", "interface_discovery_sources",
+    "autoconnect_discovered_interfaces", "autoconnect_interface_mode",
+    "autoconnect_unverified_implementations", "required_discovery_value",
+}
+DISCOVERY_INTERFACE_FIELDS = {
+    "bootstrap_only", "discoverable", "discovery_name", "announce_interval",
+    "reachable_on", "publish_ifac", "discovery_encrypt",
+}
 TYPE_FIELDS = {
-    "TCPServerInterface": COMMON | {"listen_ip", "listen_port"},
-    "TCPClientInterface": COMMON | {"target_host", "target_port"},
-    "AutoInterface": {"enabled", "mode", "network_name", "passphrase", "ifac_size"},
+    # A TCP server is the supported managed interface that can advertise a
+    # stable, connectable endpoint. Other managed interfaces can be used as a
+    # bootstrap bridge, but are not offered arbitrary discovery advertisements.
+    "TCPServerInterface": COMMON | {"listen_ip", "listen_port"} | DISCOVERY_INTERFACE_FIELDS,
+    "TCPClientInterface": COMMON | {"target_host", "target_port", "bootstrap_only"},
+    "AutoInterface": {"enabled", "mode", "network_name", "passphrase", "ifac_size", "bootstrap_only"},
 }
 INTERFACE_TYPES = set(TYPE_FIELDS)
 
@@ -65,23 +78,87 @@ def public_model(text=None):
         if section.get("kind") != "interface": continue
         values = section["settings"]
         item = {"name": section["name"], "type": values.get("type"), "enabled": values.get("enabled"), "mode": values.get("mode"), "fields": {}}
-        for key in COMMON | {"ifac_netname", "ifac_passphrase", "listen_ip", "listen_port", "target_host", "target_port", "port", "frequency", "bandwidth", "txpower", "spreadingfactor", "codingrate"}:
+        for key in COMMON | DISCOVERY_INTERFACE_FIELDS | {"ifac_netname", "ifac_passphrase", "listen_ip", "listen_port", "target_host", "target_port", "port", "frequency", "bandwidth", "txpower", "spreadingfactor", "codingrate"}:
             # IFAC is a shared interface credential that operators distribute
             # to connecting nodes. It is viewable only through the authenticated
             # internal management API; diffs, logs, audit records, and snapshot
             # metadata continue to redact it.
             if key in values: item["fields"][key] = values[key]
         interfaces.append(item)
-    return {"hash": config_hash(text), "global": {"enable_transport": global_settings.get("enable_transport", "No"), "loglevel": global_settings.get("loglevel")}, "interfaces": interfaces, "version": os.environ.get("RNS_VERSION", "1.5.7")}
+    version = os.environ.get("RNS_VERSION", "1.5.7")
+    global_model = {"enable_transport": global_settings.get("enable_transport", "No"), "loglevel": global_settings.get("loglevel")}
+    for key in DISCOVERY_GLOBAL_FIELDS:
+        global_model[key] = global_settings.get(key)
+    # The path to a network identity is intentionally not exposed through the
+    # API. Its presence only gates the version-supported encryption control.
+    return {"hash": config_hash(text), "global": global_model, "interfaces": interfaces,
+            "version": version, "discovery_capabilities": {
+                "supported": version_at_least(version, (1, 5, 0)),
+                "network_identity_configured": bool(global_settings.get("network_identity")),
+                "manual_connect": False,
+            }}
+
+def version_at_least(value, minimum):
+    try:
+        parts = tuple(int(part) for part in re.findall(r"\d+", str(value))[:3])
+        return parts >= minimum
+    except (TypeError, ValueError):
+        return False
+
+def validate_hash_list(value):
+    if not isinstance(value, str):
+        raise ValueError("Trusted discovery sources must be a comma-separated list of identity hashes")
+    values = [entry.strip().lower() for entry in re.split(r"[,\s]+", value) if entry.strip()]
+    if any(not re.fullmatch(r"[0-9a-f]{32}", entry) for entry in values):
+        raise ValueError("Each trusted discovery source must be a 32-character hexadecimal Reticulum identity hash")
+    return ", ".join(dict.fromkeys(values))
+
+def validate_reachable_on(value):
+    if not isinstance(value, str) or not value.strip() or len(value) > 253 or any(char.isspace() for char in value):
+        raise ValueError("Reachable address must be an IP address or hostname other nodes can use to reach this interface")
+    value = value.strip()
+    try:
+        ipaddress.ip_address(value)
+        return value
+    except ValueError:
+        # Deliberately reject script paths here. Reticulum supports them, but
+        # this admin GUI never writes executable paths into its configuration.
+        if "/" in value or "\\" in value or not re.fullmatch(r"(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", value):
+            raise ValueError("Reachable address must be an IP address or hostname, not a local script or path")
+        return value
+
+def validate_global_changes(changes):
+    if not isinstance(changes, dict) or not changes:
+        raise ValueError("No supported discovery settings were provided")
+    for setting, value in changes.items():
+        if setting == "enable_transport" and isinstance(value, bool): continue
+        if setting == "loglevel" and str(value) in LOG_LEVELS: continue
+        if setting == "discover_interfaces" and isinstance(value, bool): continue
+        if setting == "interface_discovery_sources":
+            changes[setting] = validate_hash_list(value); continue
+        if setting == "autoconnect_discovered_interfaces" and isinstance(value, int) and 0 <= value <= 4096: continue
+        if setting == "autoconnect_interface_mode" and str(value).lower() in DISCOVERY_MODES: continue
+        if setting == "autoconnect_unverified_implementations" and isinstance(value, bool): continue
+        if setting == "required_discovery_value" and isinstance(value, int) and 0 <= value <= 65535: continue
+        raise ValueError("Unsupported global setting")
+
+def effective_settings(section, changes):
+    values = dict(section.get("settings") or {})
+    for key, value in changes.items(): values[key] = replacement_value(key, value)
+    return values
 
 def validate_change(change, text=None):
     if not isinstance(change, dict): raise ValueError("Invalid configuration change")
     kind = change.get("kind")
     if kind == "global":
-        setting, value = change.get("setting"), change.get("value")
-        if setting == "enable_transport" and isinstance(value, bool): return
-        if setting == "loglevel" and str(value) in LOG_LEVELS: return
-        raise ValueError("Unsupported global setting")
+        validate_global_changes({change.get("setting"): change.get("value")}); return
+    if kind == "global_batch":
+        validate_global_changes(change.get("changes")); return
+    if kind == "discovery_policy":
+        changes = change.get("global_changes") or {}
+        validate_global_changes(changes)
+        validate_change({"kind": "interface", "name": change.get("interface"), "changes": change.get("interface_changes") or {}}, text)
+        return
     if kind == "interface":
         name, changes = change.get("name"), change.get("changes")
         sections = parse(read_config() if text is None else text)
@@ -94,9 +171,22 @@ def validate_change(change, text=None):
             if key == "mode" and str(value).lower() not in MODES: raise ValueError("Unsupported interface mode")
             if key == "listen_port" and (not isinstance(value, int) or not 1 <= value <= 65535): raise ValueError("Listen Port must be between 1 and 65535.")
             if key == "target_port" and (not isinstance(value, int) or not 1 <= value <= 65535): raise ValueError("Target Port must be between 1 and 65535.")
-            if key in ("listen_ip", "target_host", "network_name", "passphrase", "port") and (not isinstance(value, str) or not value.strip() or len(value) > 255 or any(ord(c) < 32 for c in value)): raise ValueError("Invalid text value")
+            if key in ("listen_ip", "target_host", "network_name", "passphrase", "port", "discovery_name") and (not isinstance(value, str) or not value.strip() or len(value) > 255 or any(ord(c) < 32 for c in value)): raise ValueError("Invalid text value")
             if key == "listen_ip": validate_host_listen_address(value)
             if key == "ifac_size" and (not isinstance(value, int) or value < 1 or value > 512): raise ValueError("Invalid IFAC size")
+            if key in ("bootstrap_only", "discoverable", "publish_ifac", "discovery_encrypt") and not isinstance(value, bool): raise ValueError(f"{key} must be boolean")
+            if key == "announce_interval" and (not isinstance(value, int) or not 5 <= value <= 10080): raise ValueError("Discovery announcement interval must be between 5 and 10080 minutes")
+            if key == "reachable_on": validate_reachable_on(value)
+        effective = effective_settings(section, changes)
+        if str(effective.get("publish_ifac", "No")).lower() in ("yes", "true", "1"):
+            if str(effective.get("discoverable", "No")).lower() not in ("yes", "true", "1"):
+                raise ValueError("Publish IFAC requires this interface to be discoverable")
+            if not (effective.get("network_name") and effective.get("passphrase")):
+                raise ValueError("Publish IFAC requires IFAC network name and passphrase on this interface")
+        if str(effective.get("discovery_encrypt", "No")).lower() in ("yes", "true", "1"):
+            global_settings = parse(read_config() if text is None else text).get("reticulum", {}).get("settings", {})
+            if not global_settings.get("network_identity"):
+                raise ValueError("Discovery encryption requires an existing Reticulum network identity; it is not configured on this node")
         return
     if kind == "interface_create":
         validate_interface_definition(change.get("interface"), read_config() if text is None else text)
@@ -173,7 +263,7 @@ def create_interface_text(text, interface):
     # become configuration text.
     allowed = TYPE_FIELDS[interface["type"]]
     lines = ["\n", f"[[{interface['name']}]]\n", f"type = {interface['type']}\n"]
-    for key in ("enabled", "mode", "listen_ip", "listen_port", "target_host", "target_port", "network_name", "passphrase", "ifac_size"):
+    for key in ("enabled", "mode", "listen_ip", "listen_port", "target_host", "target_port", "network_name", "passphrase", "ifac_size", "bootstrap_only", "discoverable", "discovery_name", "announce_interval", "reachable_on", "publish_ifac", "discovery_encrypt"):
         if key in fields and key in allowed: lines.append(f"{key} = {replacement_value(key, fields[key])}\n")
     return text.rstrip("\n") + "\n" + "".join(lines)
 
@@ -184,14 +274,18 @@ def delete_interface_text(text, name):
     return "".join(lines)
 
 def replacement_value(key, value):
-    if key in ("enabled", "enable_transport"): return "Yes" if value else "No"
+    if key in ("enabled", "enable_transport", "discover_interfaces", "autoconnect_unverified_implementations", "bootstrap_only", "discoverable", "publish_ifac", "discovery_encrypt"): return "Yes" if value else "No"
     return str(value)
 
 def edit_text(text, change):
     validate_change(change, text)
     if change["kind"] == "interface_create": return create_interface_text(text, change["interface"])
     if change["kind"] == "interface_delete": return delete_interface_text(text, change["name"])
+    if change["kind"] == "discovery_policy":
+        staged = edit_text(text, {"kind": "global_batch", "changes": change.get("global_changes") or {}})
+        return edit_text(staged, {"kind": "interface", "name": change.get("interface"), "changes": change.get("interface_changes") or {}})
     if change["kind"] == "global": target, changes = "reticulum", {change["setting"]: change["value"]}
+    elif change["kind"] == "global_batch": target, changes = "reticulum", change["changes"]
     else: target, changes = change["name"], change["changes"]
     lines, section_start, section_end, current = text.splitlines(keepends=True), {}, {}, None
     for index, line in enumerate(lines):
@@ -324,7 +418,10 @@ def write_restart_request(operation_id=None):
     return before
 
 def apply_runtime(change, operation_id=None):
-    if change["kind"] == "interface":
+    discovery_change = change.get("kind") == "interface" and bool(set((change.get("changes") or {})) & DISCOVERY_INTERFACE_FIELDS)
+    # Discovery handlers and bootstrap bookkeeping are initialised with rnsd.
+    # Restart instead of a narrow reload when any discovery setting changes.
+    if change["kind"] == "interface" and not discovery_change:
         from management import run
         result = run("reload", {"interface": change["name"]})
         return bool(result.get("ok")), "interface_reload", (result.get("stderr") or result.get("stdout") or result.get("error") or "")[-1000:]
@@ -353,7 +450,8 @@ def apply_change(admin, reason, change, operation_id=None):
         try: return json.loads(existing.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError): raise ValueError("Configuration operation state is unreadable")
     before = read_config(); candidate = edit_text(before, change); diff = redacted_diff(before, candidate)
-    if change.get("kind") != "interface":
+    needs_restart = change.get("kind") != "interface" or bool(set((change.get("changes") or {})) & DISCOVERY_INTERFACE_FIELDS)
+    if needs_restart:
         healthy, detail = health(False)
         if not healthy:
             result = {"ok": False, "operation_id": operation_id, "error": f"Refusing configuration restart while Reticulum is unhealthy: {detail}", "preflight_failed": True}

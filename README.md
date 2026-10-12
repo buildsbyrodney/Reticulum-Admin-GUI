@@ -2,6 +2,29 @@
 
 A Docker-based web administration and observability interface for Reticulum nodes. It provides a managed `rnsd` deployment, Dashboard, Interfaces, Paths, Announces, Queues, Logs, Timeline, labels, Blackholes, Incident Recovery, and a narrow internal management agent. Connected-client detail appears only where Reticulum exposes reliable data.
 
+## Interface Discovery (v0.5.0)
+
+**Discovery** is about learning connectable Reticulum interfaces advertised by other nodes; it is separate from ordinary destination announces. The Discovery page exposes the installed Reticulum 1.5.7 settings through the existing reviewed configuration lifecycle:
+
+- `discover_interfaces` — listen for advertised interfaces. It remains off until an operator enables it.
+- `autoconnect_discovered_interfaces` — bounded automatic connection count. `0` means off.
+- trusted discovery identity sources, preferred auto-connect mode, unverified implementation policy, and an optional discovery stamp requirement.
+- TCP Server discovery fields: `discoverable`, `discovery_name`, `reachable_on`, `announce_interval`, `publish_ifac`, and encryption only when a pre-existing Reticulum network identity makes it available.
+- `bootstrap_only` on compatible managed interfaces.
+
+No discovery action opens a firewall, configures Tailscale, publishes a credential, trusts a source, or enables auto-connect by default. `reachable_on` accepts an address or hostname only—not Reticulum script paths. Manual connection to an individual advertisement is intentionally not exposed because the Reticulum 1.5.7 control path does not provide a narrow safe operation for it; create an explicit TCP Client for a manual link.
+
+### Pi discovery checklist
+
+1. Update to v0.5.0 and confirm existing configuration has not changed.
+2. Open **Discovery**. Leave auto-connect at `0` while testing.
+3. Enable Interface Discovery, review the diff, and apply it.
+4. On one safe TCP Server interface, open **Edit → Advanced Discovery Controls**, set a friendly Discovery Name and a real externally reachable address, then explicitly enable Discoverable if desired.
+5. Verify the Discovery table and Timeline after a compatible advertisement is received. Do not expect data until another compatible node advertises an interface.
+6. Add known trusted discovery identities before enabling any auto-connect limit.
+7. If testing a bootstrap connection, set only that interface to Bootstrap-only, then confirm normal rnsd health, observer status, and persistence after a reboot.
+8. Keep `publish_ifac` off unless every peer and the discovery arrangement are intentionally trusted.
+
 ## Diagnostics and LXMF Test Echo Bot
 
 The **Diagnostics** page separates network-facing configuration checks from Reticulum runtime observations. It includes per-interface diagnostics, shared-instance health, and path inspection. A successful TCP-level check alone does not prove that Reticulum or IFAC is working; the page reports those layers separately.

@@ -153,4 +153,24 @@ class ConfigurationTests(unittest.TestCase):
         candidate = cfg.edit_text(SAMPLE, {"kind":"interface_delete", "name":"Public TCP"})
         self.assertNotIn("[[Public TCP]]", candidate); self.assertIn("custom_global = retain", candidate)
 
+    def test_discovery_global_settings_are_allowlisted_and_preserve_unknown_config(self):
+        change = {"kind":"global_batch", "changes":{"discover_interfaces":True, "autoconnect_discovered_interfaces":2, "interface_discovery_sources":"0123456789abcdef0123456789abcdef\n0123456789abcdef0123456789abcdef", "autoconnect_interface_mode":"boundary"}}
+        candidate = cfg.edit_text(SAMPLE, change)
+        self.assertIn("discover_interfaces = Yes", candidate)
+        self.assertIn("autoconnect_discovered_interfaces = 2", candidate)
+        self.assertIn("interface_discovery_sources = 0123456789abcdef0123456789abcdef", candidate)
+        self.assertIn("custom_global = retain", candidate)
+
+    def test_discovery_interface_controls_are_validated(self):
+        change = {"kind":"interface", "name":"Public TCP", "changes":{"discoverable":True, "discovery_name":"Trusted Site", "reachable_on":"node.example.net", "announce_interval":60, "publish_ifac":True}}
+        candidate = cfg.edit_text(SAMPLE, change)
+        self.assertIn("discoverable = Yes", candidate)
+        self.assertIn("reachable_on = node.example.net", candidate)
+        self.assertIn("publish_ifac = Yes", candidate)
+        with self.assertRaisesRegex(ValueError, "hostname"):
+            cfg.edit_text(SAMPLE, {"kind":"interface", "name":"Public TCP", "changes":{"reachable_on":"/tmp/not-allowed"}})
+        no_ifac = SAMPLE.replace("network_name = public\npassphrase = private-value\n", "")
+        with self.assertRaisesRegex(ValueError, "Publish IFAC"):
+            cfg.edit_text(no_ifac, {"kind":"interface", "name":"Public TCP", "changes":{"discoverable":True, "publish_ifac":True}})
+
 if __name__ == "__main__": unittest.main()

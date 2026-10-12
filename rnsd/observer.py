@@ -7,6 +7,7 @@ future adapter can add support without weakening the container boundary.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -54,6 +55,27 @@ def get_json_paths():
         return json.loads(output), None
     except json.JSONDecodeError as parse_error:
         return None, "rnpath returned non-JSON data: %s" % parse_error
+
+def discovery_requested():
+    """Avoid a second rnstatus call when no discovery feature is configured."""
+    try:
+        text = (CONFIG / "config").read_text(encoding="utf-8", errors="replace").lower()
+    except OSError:
+        return False
+    return bool(re.search(r"^\s*(discover_interfaces|discoverable)\s*=\s*(yes|true|1)\b", text, re.MULTILINE))
+
+def get_json_discovered_interfaces():
+    # `rnstatus --discovered --json` is the installed Reticulum 1.5.7
+    # read-only source of truth for discovery entries. The observer never
+    # connects to or modifies any discovered endpoint.
+    output, error = run("rnstatus", "--config", str(CONFIG), "--json", "--discovered", "--show-stale", "--show-unknown")
+    if output is None:
+        return None, error
+    try:
+        value = json.loads(output)
+        return value if isinstance(value, list) else None, None if isinstance(value, list) else "rnstatus discovery output was not a list"
+    except json.JSONDecodeError as parse_error:
+        return None, "rnstatus discovery output was not JSON: %s" % parse_error
 
 
 def version():
@@ -105,6 +127,7 @@ def main():
         observed_generation = generation()
         status, error = get_json_status()
         paths, path_error = get_json_paths()
+        discovered, discovery_error = get_json_discovered_interfaces() if discovery_requested() else ([], None)
         # Do not attribute a status collected while rnsd was changing to the
         # new instance. The next requested observation will collect it again.
         if generation() != observed_generation:
@@ -120,6 +143,9 @@ def main():
             "reticulum_ready": error is None and isinstance(status, (dict, list)) and bool(status),
             "paths": paths,
             "path_error": path_error,
+            "discovered_interfaces": discovered,
+            "discovery_error": discovery_error,
+            "discovery_observed_at": utc_now(),
             "source": "rnstatus --json --all --totals --queues --announce-stats --pr-stats",
             "host_network": host_network(),
         })

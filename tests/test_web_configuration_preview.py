@@ -42,6 +42,20 @@ class WebConfigurationPreviewTests(unittest.TestCase):
         self.assertIn({"section": "Public TCP", "key": "mode", "old": "full", "new": "boundary"}, preview["diff"])
         self.assertIn({"section": "Public TCP", "key": "passphrase", "old": "Changed", "new": "Changed"}, preview["diff"])
 
+    def test_discovery_batch_preview_is_local_and_immediate(self):
+        preview = self.web_app.local_config_preview({"kind": "global_batch", "changes": {"discover_interfaces": True, "autoconnect_discovered_interfaces": 1}})
+        self.assertTrue(preview["local_review"])
+        self.assertIn({"section": "reticulum", "key": "discover_interfaces", "old": None, "new": "Yes"}, preview["diff"])
+
+    def test_discovered_interface_model_redacts_ifac_key_and_marks_trusted_source(self):
+        source = "0123456789abcdef0123456789abcdef"
+        snap = {"discovered_interfaces": [{"name": "BHM", "type": "TCPServerInterface", "network_id": source, "reachable_on": "node.example.net", "port": 4242, "ifac_netname": "Trusted", "ifac_netkey": "must-not-leak"}]}
+        config = {"global": {"interface_discovery_sources": source}}
+        rows = self.web_app.discovered_interface_models(snap, [], config)
+        self.assertEqual(rows[0]["reachable_address"], "node.example.net:4242")
+        self.assertTrue(rows[0]["trusted"])
+        self.assertNotIn("ifac_netkey", rows[0])
+
     def test_review_route_does_not_ingest_or_write_observer_state(self):
         old_ingest = self.web_app.ingest_snapshot
         self.web_app.ingest_snapshot = lambda: (_ for _ in ()).throw(AssertionError("Review must not ingest observer state"))

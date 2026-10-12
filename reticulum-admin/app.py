@@ -93,7 +93,7 @@ def csrf_token():
 
 @app.context_processor
 def common_values():
-    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.4.2")}
+    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.5.0")}
 
 def require_csrf():
     if not secrets.compare_digest(session.get("csrf", ""), request.form.get("csrf_token", "")): abort(400, "Invalid form token")
@@ -250,7 +250,8 @@ def current_clients(interfaces, configured=None):
 
 def ingest_snapshot():
     snap = snapshot(); interfaces = find_interface_records(snap.get("status")) if snap.get("status") else []; clients = current_clients(interfaces, config_interfaces())
-    state = {"interfaces": {x["name"]: x.get("status") for x in interfaces}, "clients": {x["key"]: x for x in clients}, "client_counts": {x["name"]: x["client_count"] for x in interfaces if x.get("client_count") is not None}, "held_announce_total": sum(x.get("held_announces") or 0 for x in interfaces), "announce_total": sum(x.get("announces") or 0 for x in interfaces), "path_count": len(snap.get("paths") or [])}
+    discovered = discovered_interface_models(snap, interfaces)
+    state = {"interfaces": {x["name"]: x.get("status") for x in interfaces}, "clients": {x["key"]: x for x in clients}, "client_counts": {x["name"]: x["client_count"] for x in interfaces if x.get("client_count") is not None}, "held_announce_total": sum(x.get("held_announces") or 0 for x in interfaces), "announce_total": sum(x.get("announces") or 0 for x in interfaces), "path_count": len(snap.get("paths") or []), "discovered": {row["key"]: row for row in discovered}}
     with db() as con:
         row = con.execute("SELECT value_json FROM observer_state WHERE state_key='latest'").fetchone(); prior = json.loads(row["value_json"]) if row else {"interfaces": {}, "clients": {}, "client_counts": {}, "held_announce_total": 0, "announce_total": 0, "path_count": 0}
         for name, status in state["interfaces"].items():
@@ -270,6 +271,15 @@ def ingest_snapshot():
         for key, client in prior.get("clients", {}).items():
             if key not in state["clients"]:
                 con.execute("UPDATE connections SET disconnected_at=?,status='disconnected' WHERE connection_key=? AND status='active'", (now(), key)); con.execute("INSERT INTO events(occurred_at,kind,severity,interface_name,remote_ip,message) VALUES(?,?,?,?,?,?)", (now(), "client_disconnected", "info", client.get("interface"), client.get("remote_ip"), f"TCP client {client.get('remote_ip')}:{client.get('remote_port') or '—'} disconnected from {client.get('interface')}"))
+        for key, item in state["discovered"].items():
+            prior_item = prior.get("discovered", {}).get(key)
+            if not prior_item:
+                con.execute("INSERT INTO events(occurred_at,kind,severity,message,detail_json) VALUES(?,?,?,?,?)", (now(), "interface_discovered", "info", f"Discovered interface {item['name']}", json.dumps({"source": item.get("source"), "reachable_address": item.get("reachable_address")})))
+            elif item.get("auto_connected") and not prior_item.get("auto_connected"):
+                con.execute("INSERT INTO events(occurred_at,kind,severity,message) VALUES(?,?,?,?)", (now(), "interface_autoconnected", "info", f"Auto-connected discovered interface {item['name']}"))
+        for key, item in prior.get("discovered", {}).items():
+            if key not in state["discovered"]:
+                con.execute("INSERT INTO events(occurred_at,kind,severity,message) VALUES(?,?,?,?)", (now(), "discovered_interface_disappeared", "info", f"Discovered interface {item.get('name', 'unknown')} disappeared"))
         if state["held_announce_total"] >= 100 and state["held_announce_total"] > prior.get("held_announce_total", 0): con.execute("INSERT INTO events(occurred_at,kind,severity,message) VALUES(?,?,?,?)", (now(), "queue_warning", "warning", f"Held announces increased to {state['held_announce_total']}"))
         if state["announce_total"] - prior.get("announce_total", 0) >= 100: con.execute("INSERT INTO events(occurred_at,kind,severity,message) VALUES(?,?,?,?)", (now(), "announce_rate", "warning", f"High announce activity: {state['announce_total'] - prior['announce_total']} new announces"))
         if state["path_count"] - prior.get("path_count", 0) >= 25: con.execute("INSERT INTO events(occurred_at,kind,severity,message) VALUES(?,?,?,?)", (now(), "path_growth", "warning", f"{state['path_count'] - prior['path_count']} new paths learned"))
@@ -397,6 +407,12 @@ def update_config_view_cache(change):
     config = CONFIG_VIEW_CACHE.get("config")
     if not config: return
     if change.get("kind") == "global": config.setdefault("global", {})[change.get("setting")] = "Yes" if change.get("value") is True else "No" if change.get("value") is False else str(change.get("value"))
+    elif change.get("kind") == "global_batch":
+        for setting, value in (change.get("changes") or {}).items():
+            config.setdefault("global", {})[setting] = "Yes" if value is True else "No" if value is False else str(value)
+    elif change.get("kind") == "discovery_policy":
+        update_config_view_cache({"kind": "global_batch", "changes": change.get("global_changes") or {}})
+        update_config_view_cache({"kind": "interface", "name": change.get("interface"), "changes": change.get("interface_changes") or {}})
     elif change.get("kind") == "interface":
         for item in config.get("interfaces", []):
             if item.get("name") == change.get("name"):
@@ -437,6 +453,63 @@ def configuration_model():
     if result.get("ok") and result.get("config"):
         CONFIG_VIEW_CACHE["config"] = result["config"]
     return result.get("config", {})
+
+def config_yes(value):
+    return str(value or "").strip().lower() in ("yes", "true", "1", "on")
+
+def discovery_capabilities(config=None):
+    config = config or configuration_model()
+    return ((config.get("discovery_capabilities") or {}) if isinstance(config, dict) else {})
+
+def discovery_sources(config=None):
+    value = ((config or configuration_model()).get("global") or {}).get("interface_discovery_sources", "")
+    return [item.lower() for item in re.split(r"[\s,]+", str(value)) if re.fullmatch(r"[0-9a-fA-F]{32}", item)]
+
+def discovered_interface_models(snap, observed=None, config=None):
+    """Present observer-provided discovery records without exposing IFAC keys.
+
+    Discovery data is advisory runtime status. It never becomes a configuration
+    entry and an advertised IFAC name is not proof that a credential is usable.
+    """
+    sources = set(discovery_sources(config)); records = []
+    auto_sources = {str(row.get("autoconnect_source") or "").lower() for row in (observed or [])}
+    for raw in (snap.get("discovered_interfaces") or []):
+        if not isinstance(raw, dict):
+            continue
+        source = str(raw.get("network_id") or raw.get("source") or "").lower()
+        address = raw.get("reachable_on")
+        port = raw.get("port")
+        if address and port: address = f"{address}:{port}"
+        key = "|".join(str(raw.get(key) or "") for key in ("network_id", "name", "reachable_on", "port", "type"))
+        records.append({
+            "key": key, "name": raw.get("name") or "Unnamed discovered interface",
+            "type": raw.get("type") or "Unknown", "source": source or None,
+            "reachable_address": address or "Not advertised", "mode": raw.get("mode"),
+            "trusted": bool(source and source in sources),
+            "auto_connected": bool(source and source in auto_sources),
+            "bootstrap": bool(raw.get("bootstrap_only")),
+            "ifac_published": bool(raw.get("ifac_netname")),
+            "ifac_network": raw.get("ifac_netname"), "last_seen": raw.get("last_heard") or raw.get("received") or raw.get("discovered"),
+            "status": raw.get("status"), "hops": raw.get("hops"),
+        })
+    return records
+
+def discovery_form_change(form, config):
+    """Translate the narrow Discovery form into only supported config keys."""
+    changes = {
+        "discover_interfaces": form.get("discover_interfaces") == "yes",
+        "autoconnect_discovered_interfaces": int(form.get("autoconnect_discovered_interfaces", "0") or 0),
+        "autoconnect_unverified_implementations": form.get("autoconnect_unverified_implementations") == "yes",
+    }
+    mode = form.get("autoconnect_interface_mode", "").strip()
+    sources = form.get("interface_discovery_sources", "").strip()
+    stamp = form.get("required_discovery_value", "").strip()
+    if mode: changes["autoconnect_interface_mode"] = mode
+    if sources or ((config.get("global") or {}).get("interface_discovery_sources")):
+        changes["interface_discovery_sources"] = sources
+    if stamp or ((config.get("global") or {}).get("required_discovery_value")):
+        changes["required_discovery_value"] = stamp
+    return {"kind": "global_batch", "changes": changes}
 
 def make_interface_change(form):
     purpose = form.get("purpose", "manual")
@@ -480,6 +553,19 @@ def make_interface_change(form):
             bits = form.get("ifac_size_bits", "")
             if not bits.isdigit() or int(bits) < 8 or int(bits) > 512 or int(bits) % 8: raise ValueError("Custom IFAC size must be a whole number of bytes from 8 to 512 bits")
             fields["ifac_size"] = int(bits) // 8
+    # These are deliberately opt-in.  AutoInterface has no stable reachable
+    # endpoint to advertise, while TCP clients cannot safely advertise a
+    # server endpoint, so only the Reticulum-supported server controls appear.
+    if interface_type == "TCPServerInterface":
+        for key in ("discoverable", "publish_ifac", "discovery_encrypt"):
+            if form.get(key): fields[key] = True
+        for key in ("discovery_name", "reachable_on"):
+            value = form.get(key, "").strip()
+            if value: fields[key] = value
+        interval = form.get("announce_interval", "").strip()
+        if interval: fields["announce_interval"] = int(interval) if interval.isdigit() else interval
+    if form.get("bootstrap_only"):
+        fields["bootstrap_only"] = True
     return {"kind":"interface_create", "interface": {"name":form.get("name", "").strip(), "type":interface_type, "enabled":bool(form.get("enabled")), "mode":form.get("mode") or preset.get("mode", "full"), "fields":fields}}
 
 def provisioning_summary(change, form):
@@ -526,6 +612,15 @@ def local_config_preview(change):
         old = (config.get("global") or {}).get(setting)
         diff.append({"section": "reticulum", "key": setting, "old": display_config_value(old), "new": display_config_value(change.get("value"))})
         return {"ok": True, "diff": diff, "local_review": True}
+    if change.get("kind") == "global_batch":
+        for setting, value in (change.get("changes") or {}).items():
+            old = (config.get("global") or {}).get(setting)
+            diff.append({"section": "reticulum", "key": setting, "old": display_config_value(old), "new": display_config_value(value)})
+        return {"ok": True, "diff": diff, "local_review": True}
+    if change.get("kind") == "discovery_policy":
+        global_preview = local_config_preview({"kind": "global_batch", "changes": change.get("global_changes") or {}})
+        interface_preview = local_config_preview({"kind": "interface", "name": change.get("interface"), "changes": change.get("interface_changes") or {}})
+        return {"ok": True, "diff": global_preview["diff"] + interface_preview["diff"], "local_review": True}
 
     name = change.get("name")
     item = next((row for row in config.get("interfaces", []) if row.get("name") == name), {})
@@ -547,7 +642,7 @@ def system_info():
         values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line)
         memory = values.get("MemTotal", "Unavailable").strip()
     except OSError: pass
-    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.4.2"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
+    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.5.0"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
@@ -614,16 +709,16 @@ def interface_edit(name):
     if request.method == "POST":
         require_csrf()
         changes = {}
-        for key in ("enabled", "mode", "network_name", "passphrase", "ifac_size", "listen_ip", "listen_port", "target_host", "target_port"):
+        for key in ("enabled", "mode", "network_name", "passphrase", "ifac_size", "listen_ip", "listen_port", "target_host", "target_port", "bootstrap_only", "discoverable", "discovery_name", "announce_interval", "reachable_on", "publish_ifac", "discovery_encrypt"):
             value = request.form.get(key)
             if value not in (None, ""):
-                changes[key] = (value.lower() in ("on", "yes", "true", "1")) if key == "enabled" else (int(value) if key in ("ifac_size", "listen_port", "target_port") and value.isdigit() else value)
+                changes[key] = (value.lower() in ("on", "yes", "true", "1")) if key in ("enabled", "bootstrap_only", "discoverable", "publish_ifac", "discovery_encrypt") else (int(value) if key in ("ifac_size", "listen_port", "target_port", "announce_interval") and value.isdigit() else value)
         change = {"kind": "interface", "name": name, "changes": changes}
         result = local_config_preview(change)
         operation_id = f"CFG-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(3).upper()}"
         session["config_change"] = {"change": change, "reason": request.form.get("reason", f"Update {name}")[:240], "operation_id": operation_id}
         return render_template("configuration_preview.html", title="Review Interface Change", preview=result, change=change)
-    return render_template("interface_edit.html", title=f"Edit Interface: {name}", interface=row, modes=MODE_HELP)
+    return render_template("interface_edit.html", title=f"Edit Interface: {name}", interface=row, modes=MODE_HELP, discovery=discovery_capabilities())
 
 @app.route("/interfaces/add", methods=["GET", "POST"])
 @login_required
@@ -674,13 +769,37 @@ def interface_delete(name):
 @app.get("/topology")
 @login_required
 def topology():
-    _, observed, _ = ingest_snapshot(); rows, _ = merge_interface_models(configuration_model().get("interfaces", []), observed)
+    snap, observed, _ = ingest_snapshot(); rows, _ = merge_interface_models(configuration_model().get("interfaces", []), observed)
     warnings=[]; modes={str(item.get("mode", "")).lower() for item in rows}
     if "full" in modes and "internal" in modes: warnings.append("A Full interface and an Internal interface are both configured. Review announce propagation for this topology.")
     if transport_enabled() and any(item.get("type") == "TCPServerInterface" and str(item.get("mode", "")).lower() == "full" for item in rows): warnings.append("Transport Mode is enabled while a Full TCP Server interface is configured. Confirm this node is intended to route for other peers.")
     for item in rows:
         if item.get("type") == "TCPServerInterface" and not item.get("fields", {}).get("passphrase"): warnings.append(f"IFAC is disabled on TCP Server interface {item.get('name')}.")
-    return render_template("topology.html", title="Topology", rows=rows, warnings=warnings)
+    return render_template("topology.html", title="Topology", rows=rows, warnings=warnings, discovered=discovered_interface_models(snap, observed))
+
+@app.route("/discovery", methods=["GET", "POST"])
+@login_required
+def discovery():
+    config = configuration_model()
+    if request.method == "POST":
+        require_csrf()
+        try:
+            change = discovery_form_change(request.form, config)
+            preview = local_config_preview(change)
+            if not any(str(item.get("old")) != str(item.get("new")) for item in preview["diff"]):
+                flash("No discovery settings changed.", "info")
+                return redirect(url_for("discovery"))
+        except (ValueError, TypeError) as error:
+            flash(str(error), "error")
+            return redirect(url_for("discovery"))
+        operation_id = f"CFG-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(3).upper()}"
+        session["config_change"] = {"change": change, "reason": request.form.get("reason", "Update discovery settings")[:240], "operation_id": operation_id, "return_to": url_for("discovery")}
+        return render_template("configuration_preview.html", title="Review Discovery Settings", preview=preview, change=change,
+                               warning="Discovery and auto-connect can change how this node learns about remote interfaces. No discovered interface will be connected automatically unless you explicitly set a non-zero auto-connect limit.")
+    snap, observed, _ = ingest_snapshot()
+    return render_template("discovery.html", title="Discovery", config=config, capabilities=discovery_capabilities(config),
+                           discovered=discovered_interface_models(snap, observed, config), discovery_error=snap.get("discovery_error"),
+                           configured=config.get("interfaces", []), sources=discovery_sources(config), labels=labels())
 
 @app.get("/help")
 @login_required
@@ -888,7 +1007,8 @@ def interface_diagnostic(row):
 @login_required
 def diagnostics():
     snap, observed, clients = ingest_snapshot(); rows, _ = merge_interface_models(configuration_model().get("interfaces", []), observed)
-    health = {"Shared Instance": snap.get("reticulum_ready") is True and not snap.get("status_error"), "Transport Mode": transport_enabled(), "Known Paths": len(snap.get("paths") or []), "Configured Interfaces": len(rows), "Runtime Interfaces": len(observed), "Connected Clients": len(clients), "Observer": bool(snap.get("collected_at")), "Management Agent": bool(management("/capabilities").get("capabilities"))}
+    discovered = discovered_interface_models(snap, observed)
+    health = {"Shared Instance": snap.get("reticulum_ready") is True and not snap.get("status_error"), "Transport Mode": transport_enabled(), "Known Paths": len(snap.get("paths") or []), "Configured Interfaces": len(rows), "Runtime Interfaces": len(observed), "Connected Clients": len(clients), "Observer": bool(snap.get("collected_at")), "Management Agent": bool(management("/capabilities").get("capabilities")), "Discovery enabled": config_yes((configuration_model().get("global") or {}).get("discover_interfaces")), "Interfaces discovered": len(discovered), "Auto-connected interfaces": sum(1 for row in discovered if row["auto_connected"])}
     return render_template("diagnostics.html", title="Diagnostics", rows=rows, health=health, bot=bot_status())
 
 @app.get("/diagnostics/interfaces/<name>")
@@ -972,7 +1092,7 @@ def configuration_apply():
     if result.get("ok"): update_config_view_cache(item["change"])
     record_config_change(result, item["change"])
     flash("Configuration applied and restart verified." if result.get("ok") and result.get("restart_verified") else "Configuration applied." if result.get("ok") else "The management operation did not return a result in time. Reticulum may still have applied the change; check current status before retrying." if result.get("unknown") else "Configuration failed and was rolled back." if result.get("rolled_back") else "Configuration failed; recovery needs attention.", "success" if result.get("ok") else "error")
-    return redirect(url_for("configuration"))
+    return redirect(item.get("return_to") or url_for("configuration"))
 
 @app.route("/snapshots", methods=["GET", "POST"])
 @login_required
