@@ -337,8 +337,9 @@ class LiveRnstatusTests(unittest.TestCase):
         self.assertIsNone(models[0]["identity"])
         self.assertEqual(models[1]["identity"], identity)
         self.assertTrue(any(kind == "Destination path" for kind, _ in module.hash_context(destination, models, {})))
-        original_snapshot, original_management = module.snapshot, module.management
+        original_snapshot, original_management, original_ingest = module.snapshot, module.management, module.ingest_snapshot
         module.snapshot = lambda: {"paths": paths, "status": {"interfaces": []}}
+        module.ingest_snapshot = lambda: ({"paths": paths, "path_error": None}, [], [])
         module.management = lambda *args, **kwargs: {"capabilities": {"blackhole": True, "unblackhole": True, "drop_path": True}}
         try:
             page = self.client().get("/paths?q=Known").get_data(as_text=True)
@@ -347,7 +348,7 @@ class LiveRnstatusTests(unittest.TestCase):
             rejected = self.client().post("/recovery", data={"csrf_token": "test-csrf", "identity": destination, "blackhole": "on"}, follow_redirects=True)
             self.assertIn("known as a destination", rejected.get_data(as_text=True))
         finally:
-            module.snapshot, module.management = original_snapshot, original_management
+            module.snapshot, module.management, module.ingest_snapshot = original_snapshot, original_management, original_ingest
 
 
 if __name__ == "__main__":
