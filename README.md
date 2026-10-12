@@ -2,6 +2,23 @@
 
 A Docker-based web administration and observability interface for Reticulum nodes. It provides a managed `rnsd` deployment, Dashboard, Interfaces, Paths, Announces, Queues, Logs, Timeline, labels, Blackholes, Incident Recovery, and a narrow internal management agent. Connected-client detail appears only where Reticulum exposes reliable data.
 
+## Diagnostics and LXMF Test Echo Bot
+
+The **Diagnostics** page separates network-facing configuration checks from Reticulum runtime observations. It includes per-interface diagnostics, shared-instance health, and path inspection. A successful TCP-level check alone does not prove that Reticulum or IFAC is working; the page reports those layers separately.
+
+`lxmf-test-bot` is a separate, non-administrative service with its own persistent LXMF identity. It waits for the managed rnsd shared instance before connecting, never has the management token, Docker socket, admin database, or configuration-write access. Its identity and LXMF destination persist under `data/bot/`.
+
+Open **Diagnostics → Test Echo Bot**, copy or announce its LXMF destination, then message it from MeshChat:
+
+```text
+PING          → PONG
+ECHO hello    → Echo: hello
+HELP          → command list
+STATUS        → safe read-only node summary
+```
+
+The bot announces on startup and every 60 minutes by default; the GUI enforces a 15-minute minimum periodic interval. It stores only operational metadata such as counters and timestamps, not message bodies. After updating on a Pi: announce the bot, add or discover the destination in MeshChat, send `PING`, restart only `lxmf-test-bot`, confirm its destination is unchanged, and send `PING` again. Test remote peers through a known route only after local VM messaging succeeds.
+
 **Supported by design:** native Linux with Docker Engine and Docker Compose v2 on `x86_64`, `aarch64`, and `arm64`. Primary target distributions are Debian 12/13, Raspberry Pi OS 64-bit where practical, and Ubuntu Server. The managed `rnsd` service uses Linux host networking so it can bind real host interfaces; Docker Desktop and WSL do not provide the required equivalent behavior. **Raspberry Pi 3 ARM64 has been physically validated through successful container build and stack start on Debian 64-bit, with Docker 29.9.0, Docker Compose 5.6.0, and Reticulum rns 1.5.7.**
 
 ## Install on Ubuntu/Linux

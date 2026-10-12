@@ -21,6 +21,8 @@ from reticulum_adapter import find_interface_records, inbound_tcp_child_records
 APP_DATA = Path(os.environ.get("APP_DATA", "/var/lib/reticulum-admin"))
 DB_PATH = APP_DATA / "admin.db"
 RETICULUM_DIR = Path(os.environ.get("RETICULUM_DIR", "/reticulum"))
+BOT_STATUS_DIR = Path(os.environ.get("BOT_STATUS_DIR", "/bot-status"))
+BOT_CONFIG_DIR = Path(os.environ.get("BOT_CONFIG_DIR", "/bot-config"))
 TIMEZONE_NAME = os.environ.get("SERVER_TIMEZONE", "America/Chicago")
 try:
     SERVER_TIMEZONE = ZoneInfo(TIMEZONE_NAME)
@@ -74,12 +76,24 @@ def format_bytes(value):
         if value < 1024 or unit == units[-1]: return f"{value:.1f} {unit}" if unit != "B" else f"{value} B"
         value /= 1024
 
+BOT_DEFAULTS = {"enabled": True, "display_name": "Reticulum Admin Test Bot", "announce_on_startup": True, "periodic_announce": True, "interval_minutes": 60}
+def atomic_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True); temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value), encoding="utf-8"); os.replace(temporary, path)
+def bot_settings():
+    try: loaded = json.loads((BOT_CONFIG_DIR / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError): loaded = {}
+    return {**BOT_DEFAULTS, **{key: loaded[key] for key in BOT_DEFAULTS if key in loaded}}
+def bot_status():
+    try: return json.loads((BOT_STATUS_DIR / "status.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError): return {"running": False, "shared_instance_connected": False, "lxmf_router_ready": False, "error": "Bot has not reported status yet."}
+
 def csrf_token():
     session.setdefault("csrf", secrets.token_urlsafe(32)); return session["csrf"]
 
 @app.context_processor
 def common_values():
-    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.14")}
+    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.4.0")}
 
 def require_csrf():
     if not secrets.compare_digest(session.get("csrf", ""), request.form.get("csrf_token", "")): abort(400, "Invalid form token")
@@ -533,7 +547,7 @@ def system_info():
         values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line)
         memory = values.get("MemTotal", "Unavailable").strip()
     except OSError: pass
-    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.3.14"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
+    return {"app_version":os.environ.get("RETICULUM_ADMIN_VERSION", "0.4.0"), "container_arch":platform.machine(), "host_arch":os.environ.get("HOST_ARCH", "unknown"), "host_os":os.environ.get("HOST_OS", "unknown"), "python":platform.python_version(), "cpu_count":os.cpu_count(), "memory":memory, "docker":os.environ.get("INSTALL_DOCKER_VERSION", "unknown"), "compose":os.environ.get("INSTALL_COMPOSE_VERSION", "unknown")}
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
@@ -852,6 +866,59 @@ def system():
     snap, _, _ = ingest_snapshot(); caps=management("/capabilities")
     checks={"Container running":snap["running"], "Reticulum ready":snap.get("reticulum_ready") is True and not bool(snap.get("status_error")), "observer snapshot":bool(snap.get("collected_at")), "rnpath":not bool(snap.get("path_error")), "management agent":bool(caps.get("capabilities")), "admin database":True}
     return render_template("system.html", title="System", info=system_info(), snap=snap, checks=checks, capabilities=caps.get("capabilities", {}))
+
+def interface_diagnostic(row):
+    fields = row.get("configured_fields") or {}; runtime_up = row.get("status") is True
+    checks = []
+    interface_type = row.get("type")
+    if interface_type == "TCPClientInterface":
+        host, port = fields.get("target_host"), fields.get("target_port")
+        checks += [("Network Layer", None), ("Target host configured", bool(host)), ("Target port configured", bool(port))]
+        if host:
+            try: socket.getaddrinfo(host, None); checks.append(("Target resolved", True))
+            except socket.gaierror: checks.append(("Target resolved", False))
+        checks += [("Reticulum Layer", None), ("Runtime interface present", not row.get("runtime_only")), ("Runtime status Up", runtime_up), ("IFAC active", row.get("ifac_enabled") is True), ("Traffic observed", bool((row.get("rx_bytes") or 0) + (row.get("tx_bytes") or 0)))]
+    elif interface_type == "TCPServerInterface":
+        checks += [("Network Layer", None), ("Listen IP configured", bool(fields.get("listen_ip"))), ("Listen port valid", str(fields.get("listen_port", "")).isdigit() and 0 < int(fields.get("listen_port")) < 65536), ("Reticulum Layer", None), ("Runtime interface present", not row.get("runtime_only")), ("Runtime status Up", runtime_up), ("IFAC active", row.get("ifac_enabled") is True), ("Traffic observed", bool((row.get("rx_bytes") or 0) + (row.get("tx_bytes") or 0)))]
+    else:
+        checks += [("Reticulum Layer", None), ("Runtime interface present", not row.get("runtime_only")), ("Runtime status Up", runtime_up), ("IFAC active", row.get("ifac_enabled") is True), ("Peers reachable", row.get("peer_count") if row.get("peer_count") is not None else None), ("Traffic observed", bool((row.get("rx_bytes") or 0) + (row.get("tx_bytes") or 0)))]
+    return checks
+
+@app.get("/diagnostics")
+@login_required
+def diagnostics():
+    snap, observed, clients = ingest_snapshot(); rows, _ = merge_interface_models(configuration_model().get("interfaces", []), observed)
+    health = {"Shared Instance": snap.get("reticulum_ready") is True and not snap.get("status_error"), "Transport Mode": transport_enabled(), "Known Paths": len(snap.get("paths") or []), "Configured Interfaces": len(rows), "Runtime Interfaces": len(observed), "Connected Clients": len(clients), "Observer": bool(snap.get("collected_at")), "Management Agent": bool(management("/capabilities").get("capabilities"))}
+    return render_template("diagnostics.html", title="Diagnostics", rows=rows, health=health, bot=bot_status())
+
+@app.get("/diagnostics/interfaces/<name>")
+@login_required
+def diagnose_interface(name):
+    _, observed, _ = ingest_snapshot(); rows, _ = merge_interface_models(configuration_model().get("interfaces", []), observed)
+    row = next((item for item in rows if item.get("name") == name), None)
+    if not row: abort(404)
+    return render_template("interface_diagnostics.html", title=f"Diagnose {name}", interface=row, checks=interface_diagnostic(row))
+
+@app.route("/diagnostics/bot", methods=["GET", "POST"])
+@login_required
+def test_echo_bot():
+    if request.method == "POST":
+        require_csrf(); action = request.form.get("action")
+        settings = bot_settings()
+        if action == "save":
+            try: interval = int(request.form.get("interval_minutes", ""))
+            except ValueError: interval = 0
+            if interval < 15:
+                flash("Periodic announce interval must be at least 15 minutes.", "error")
+                return redirect(url_for("test_echo_bot"))
+            settings.update({"enabled": bool(request.form.get("enabled")), "display_name": request.form.get("display_name", "").strip()[:80] or BOT_DEFAULTS["display_name"], "announce_on_startup": bool(request.form.get("announce_on_startup")), "periodic_announce": bool(request.form.get("periodic_announce")), "interval_minutes": interval})
+            atomic_json(BOT_CONFIG_DIR / "settings.json", settings); audit("bot_settings", "Test Echo Bot settings changed"); flash("Bot settings saved.", "success")
+        elif action == "announce":
+            (BOT_CONFIG_DIR / "announce-request").parent.mkdir(parents=True, exist_ok=True); (BOT_CONFIG_DIR / "announce-request").write_text(str(now())); audit("bot_announce_requested", "Manual Test Echo Bot announce requested"); flash("Manual announce requested.", "success")
+        elif action == "stop":
+            settings["enabled"] = False; atomic_json(BOT_CONFIG_DIR / "settings.json", settings); audit("bot_disabled", "Test Echo Bot disabled"); flash("Bot disabled; its identity is preserved.", "success")
+        return redirect(url_for("test_echo_bot"))
+    return render_template("bot.html", title="Test Echo Bot", settings=bot_settings(), status=bot_status())
 
 @app.get("/announces")
 @login_required

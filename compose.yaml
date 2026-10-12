@@ -11,7 +11,7 @@ services:
     network_mode: host
     environment:
       SERVER_TIMEZONE: ${SERVER_TIMEZONE:-America/Chicago}
-      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.3.11}
+      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.4.0}
       HOST_ARCH: ${HOST_ARCH:-unknown}
       HOST_OS: ${HOST_OS:-unknown}
       INSTALL_DOCKER_VERSION: ${INSTALL_DOCKER_VERSION:-unknown}
@@ -37,7 +37,7 @@ services:
     restart: unless-stopped
     environment:
       MANAGEMENT_TOKEN: ${MANAGEMENT_TOKEN:?Set MANAGEMENT_TOKEN in .env}
-      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.3.11}
+      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.4.0}
       RETICULUM_DIR: /reticulum
       # Observer-based health and this bounded restart budget fit inside the explicit
       # 90-second agent worker and 100-second web request budgets.
@@ -62,7 +62,7 @@ services:
       SERVER_TIMEZONE: ${SERVER_TIMEZONE:-America/Chicago}
       MANAGEMENT_URL: http://management-agent:8081
       MANAGEMENT_TOKEN: ${MANAGEMENT_TOKEN:?Set MANAGEMENT_TOKEN in .env}
-      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.3.11}
+      RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.4.0}
       HOST_ARCH: ${HOST_ARCH:-unknown}
       HOST_OS: ${HOST_OS:-unknown}
       INSTALL_DOCKER_VERSION: ${INSTALL_DOCKER_VERSION:-unknown}
@@ -75,7 +75,27 @@ services:
       # Read-only by design: the GUI cannot modify Reticulum in this release.
       - ./data/reticulum:/reticulum:ro
       - ./data/admin:/var/lib/reticulum-admin
+      - ./data/bot-status:/bot-status:ro
+      - ./data/bot-config:/bot-config
     networks: [default, management]
+
+  lxmf-test-bot:
+    build: ./lxmf-test-bot
+    restart: unless-stopped
+    depends_on:
+      rnsd:
+        condition: service_started
+    environment:
+      BOT_STATE_DIR: /bot
+      BOT_STATUS_DIR: /status
+      BOT_CONFIG_DIR: /config
+    volumes:
+      # The bot can join the existing Reticulum shared instance but cannot
+      # modify its configuration. Its own identity and settings are isolated.
+      - ./data/reticulum:/reticulum:ro
+      - ./data/bot:/bot
+      - ./data/bot-status:/status
+      - ./data/bot-config:/config
 
 networks:
   management:
