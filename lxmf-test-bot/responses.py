@@ -99,7 +99,8 @@ RADIO = (
     "A logbook turns a contact into a remembered contact.",
 )
 
-# Canonical KJV entries are generated from midvash/bible-data's 1769 source.
+# Canonical KJV entries are generated from the OpenBible Pure Cambridge Edition
+# source attributed to BibleProtector.com. See kjv.json metadata and the generator.
 _payload = json.loads((Path(__file__).with_name("kjv.json")).read_text(encoding="utf-8"))
 KJV = {reference.lower(): (reference, text) for reference, text in _payload["verses"].items()}
 KJV_TOPICS = {
