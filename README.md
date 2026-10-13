@@ -125,11 +125,11 @@ The chat workspace uses small authenticated read-only polls instead of WebSocket
 
 Names are presentation hints, not authentication. A saved Contact name takes precedence, followed by the latest public LXMF announce name, then a display name supplied by an incoming message when the pinned runtime exposes one, then a shortened destination hash. The Messaging service only records delivery announces it receives after it starts. With the pinned RNS/LXMF APIs there is no supported safe enumeration of historic announce app-data, so it does not scrape logs or invent peers that another client may have retained.
 
-The workspace adapts for phones and iPhone Safari: narrow screens show the conversation/announce list first, then a full-width conversation with a Back control and usable bottom composer. v0.7.1 remains text-only; it does not provide file, image, audio, voice, or other attachments.
+The workspace adapts for phones and iPhone Safari: narrow screens show the conversation/announce list first, then a full-width conversation with a Back control and usable bottom composer. v0.7.2 remains text-only; it does not provide file, image, audio, voice, or other attachments.
 
 If the messaging service restarts while an outbound message is Pending or Queued, it retries that same stored message once when the new service process starts. Delivered and Failed messages are never resent automatically. LXMF 0.9.6 does not provide a durable exactly-once transaction shared with the local message database, so an abrupt crash at the exact delivery boundary can theoretically result in a duplicate network delivery; retrying is preferred to silently losing a queued message.
 
-My Identity is separate from the Test Echo Bot. Messages persist locally under `data/messaging/`; they are not copied into Timeline, Diagnostics, or generic logs. The server must be running to receive direct messages. v0.7.1 does not add phone push notifications, attachments, group chat, or remote administration through LXMF messages. LXMF clients can cache a display name until a later announce or rediscovery.
+My Identity is separate from the Test Echo Bot. Messages persist locally under `data/messaging/`; they are not copied into Timeline, Diagnostics, or generic logs. The server must be running to receive direct messages. v0.7.2 does not add phone push notifications, attachments, group chat, or remote administration through LXMF messages. LXMF clients can cache a display name until a later announce or rediscovery.
 
 ```sh
 docker compose ps
