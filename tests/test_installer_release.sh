@@ -4,6 +4,15 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 VERSION=$(tr -d '\r\n' < "$ROOT/VERSION")
+PROJECT_VERSION=$(sed -n 's/^PROJECT_VERSION="\(.*\)"$/\1/p' "$ROOT/install.sh")
+PROJECT_TAG=$(sed -n 's/^PROJECT_TAG="\(.*\)"$/\1/p' "$ROOT/install.sh")
+if [ "$VERSION" != "$PROJECT_VERSION" ] || [ "v$VERSION" != "$PROJECT_TAG" ]; then
+  echo "VERSION, PROJECT_VERSION, and PROJECT_TAG must describe the same release." >&2
+  exit 1
+fi
+grep -Fx "RETICULUM_ADMIN_VERSION=$VERSION" "$ROOT/.env.example" >/dev/null
+grep -F "RETICULUM_ADMIN_VERSION: \${RETICULUM_ADMIN_VERSION:-$VERSION}" "$ROOT/compose.yaml" >/dev/null
+grep -F "\"version\":\"$VERSION\"" "$ROOT/release.json" >/dev/null
 ARCHIVE_NAME="reticulum-admin-${VERSION}.tar.gz"
 CHECKSUM_NAME="${ARCHIVE_NAME}.sha256"
 WORK=$(mktemp -d)
