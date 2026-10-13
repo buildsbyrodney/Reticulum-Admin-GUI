@@ -107,7 +107,7 @@ test "$messaging_destination_before" != "$bot_destination_after"
 # any connection or configuration action.
 grep -q '"announce_listener_registered": true' "$messaging_state/status.json"
 docker exec "$messaging_container" python -c "import types, messaging; messaging.Messaging().receive_announce(bytes.fromhex('abcdef0123456789abcdef0123456789'), types.SimpleNamespace(hash=bytes.fromhex('1234567890abcdef1234567890abcdef')), b'CI Announced Peer')"
-if ! wait_for 10 python3 -c "import sqlite3; row=sqlite3.connect('$messaging_state/messages.db').execute(\"select destination_hash,announce_count from announced_peers where destination_hash='abcdef0123456789abcdef0123456789'\").fetchone(); assert row and row[1] == 1"; then
+if ! wait_for 10 python3 -c "import sqlite3; row=sqlite3.connect('$messaging_state/messages.db').execute(\"select destination_hash,display_name,announce_count from announced_peers where destination_hash='abcdef0123456789abcdef0123456789'\").fetchone(); assert row and row[1] == 'CI Announced Peer' and row[2] == 1"; then
   docker logs "$messaging_container" >&2 || true
   echo "Messaging service did not persist an LXMF announce" >&2
   exit 1
