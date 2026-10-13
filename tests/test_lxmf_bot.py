@@ -84,7 +84,7 @@ class EchoBotTests(unittest.TestCase):
             old = bot.CONFIG; bot.CONFIG = Path(root)
             try:
                 settings = {"display_name": "W4OWE Test Bot 🤖", "tagline": "Send HELP for commands"}
-                (bot.CONFIG / "settings.json").parent.mkdir(parents=True)
+                (bot.CONFIG / "settings.json").parent.mkdir(parents=True, exist_ok=True)
                 (bot.CONFIG / "settings.json").write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
                 self.assertEqual(bot.read_settings()["display_name"], "W4OWE Test Bot 🤖")
                 self.assertEqual(bot.read_settings()["tagline"], "Send HELP for commands")
@@ -94,7 +94,7 @@ class EchoBotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             old = bot.CONFIG; bot.CONFIG = Path(root)
             try:
-                (bot.CONFIG / "settings.json").parent.mkdir(parents=True)
+                (bot.CONFIG / "settings.json").parent.mkdir(parents=True, exist_ok=True)
                 (bot.CONFIG / "settings.json").write_text(json.dumps({"rate_limit_per_minute": 1}), encoding="utf-8")
                 instance = bot.EchoBot()
                 self.assertTrue(instance.allowed_sender(b"sender"))
@@ -109,7 +109,7 @@ class EchoBotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             old = bot.CONFIG; bot.CONFIG = Path(root)
             try:
-                (bot.CONFIG / "settings.json").parent.mkdir(parents=True)
+                (bot.CONFIG / "settings.json").parent.mkdir(parents=True, exist_ok=True)
                 (bot.CONFIG / "settings.json").write_text(json.dumps({"enabled": False}), encoding="utf-8")
                 instance = bot.EchoBot(); instance.received(Message())
                 self.assertEqual(instance.counters["messages_received"], 0)
