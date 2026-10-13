@@ -51,15 +51,20 @@ fi
 # Update flow also retains the release filename and extracts successfully.
 mkdir -p "$WORK/update"
 cp "$WORK/published/$ARCHIVE_NAME" "$WORK/published/$CHECKSUM_NAME" "$WORK/update/"
-mkdir -p "$WORK/update-extracted/data/messaging"
+mkdir -p "$WORK/update-extracted/data/messaging" "$WORK/update-extracted/data/messaging-requests"
 printf '%s\n' 'persistent-messaging-identity' > "$WORK/update-extracted/data/messaging/identity"
+printf '%s\n' 'persistent-messaging-sqlite' > "$WORK/update-extracted/data/messaging/messages.db"
+printf '%s\n' 'persistent-messaging-request' > "$WORK/update-extracted/data/messaging-requests/outbound-test.json"
 verify_and_extract "$WORK/update" "$WORK/update-extracted"
 test "$(cat "$WORK/update-extracted/data/messaging/identity")" = "persistent-messaging-identity"
+test "$(cat "$WORK/update-extracted/data/messaging/messages.db")" = "persistent-messaging-sqlite"
+test "$(cat "$WORK/update-extracted/data/messaging-requests/outbound-test.json")" = "persistent-messaging-request"
 
 # Keep the test coupled to the installer call sites, not just an equivalent flow.
 grep -F "fetch_release \"\$TMPDIR_INSTALL/\$ARCHIVE_NAME\" \"\$TMPDIR_INSTALL/\$CHECKSUM_NAME\"" "$ROOT/install.sh" >/dev/null
 grep -F "tar -xzf \"\$TMPDIR_INSTALL/\$ARCHIVE_NAME\"" "$ROOT/install.sh" >/dev/null
 grep -F 'TMP=${TMPDIR:-/tmp}/$ARCHIVE_NAME' "$ROOT/install.sh" >/dev/null
+grep -F 'lxmf-messaging' "$ROOT/scripts/build-release.sh" >/dev/null
 # An update preserves credentials and other settings, but its footer must
 # identify the newly unpacked release rather than a stale .env value.
 grep -F 'RETICULUM_ADMIN_VERSION=$APP_VERSION' "$ROOT/install.sh" >/dev/null
