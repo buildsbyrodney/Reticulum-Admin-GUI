@@ -1,1 +1,31 @@
-{% extends 'base.html' %}{% block content %}<div class="page-actions"><div><h1>Messaging</h1><p>Persistent LXMF messages for this server’s separate operator identity. Bot messages and identity are separate.</p></div><div><a class="button" href="{{ url_for('messaging_new') }}">New Message</a> <a class="button" href="{{ url_for('messaging_contacts') }}">Contacts</a> <a class="button" href="{{ url_for('messaging_identity') }}">My Identity</a></div></div>{% if status.error %}<p class="flash error">{{ status.error }}</p>{% endif %}<section class="card"><p>Status: {{ 'Ready' if status.running else 'Starting / unavailable' }} · Shared instance: {{ 'Connected' if status.shared_instance_connected else 'Waiting' }} · Router: {{ 'Ready' if status.lxmf_router_ready else 'Waiting' }}</p></section><table><tr><th>From / To</th><th>Preview</th><th>Time</th><th>Status</th></tr>{% for row in rows %}<tr class="{{ 'unread' if row.direction == 'inbound' and not row.read_at else '' }}"><td><a href="{{ url_for('messaging_conversation', key=row.conversation_key) }}">{{ row.contact_name or row.sender_name or row.conversation_key }}</a><br><small>{{ row.conversation_key }}</small></td><td>{{ row.body[:140] }}{% if row.body|length > 140 %}…{% endif %}</td><td>{{ format_time(row.received_at) }}</td><td>{{ 'Unread' if row.direction == 'inbound' and not row.read_at else row.delivery_state }}</td></tr>{% else %}<tr><td colspan="4">No messages stored yet.</td></tr>{% endfor %}</table><p class="muted">Messages are private operator content and are not copied into Timeline, Diagnostics, or generic logs.</p>{% endblock %}
+{% extends 'base.html' %}
+{% block content %}
+<div class="chat-workspace{% if selected %} has-selection{% endif %}">
+  <aside class="chat-sidebar">
+    <div class="chat-sidebar-head"><h1>Messaging</h1><a class="button" href="{{ url_for('messaging_new') }}">New</a></div>
+    <div class="chat-tabs"><a class="{% if tab == 'conversations' %}active{% endif %}" href="{{ url_for('messaging', tab='conversations') }}">Conversations</a><a class="{% if tab == 'announces' %}active{% endif %}" href="{{ url_for('messaging', tab='announces') }}">Announces</a></div>
+    <form class="chat-search" method="get" action="{{ url_for('messaging') }}"><input type="hidden" name="tab" value="{{ tab }}"><input name="q" value="{{ search }}" maxlength="80" placeholder="Search {{ 'announces' if tab == 'announces' else 'conversations' }}"><button>Search</button></form>
+    <div class="chat-list">
+      {% if tab == 'conversations' %}
+        {% for item in conversations %}
+        <a class="chat-list-row{% if item.conversation_key == selected %} selected{% endif %}{% if item.unread_count %} unread{% endif %}" href="{{ url_for('messaging_conversation', key=item.conversation_key, tab='conversations') }}"><strong>{{ item.contact_name or item.announced_name or short_destination(item.conversation_key) }}</strong>{% if item.unread_count %}<span class="unread-badge">{{ item.unread_count }}</span>{% endif %}<span class="chat-preview">{{ 'You: ' if item.direction == 'outbound' else '' }}{{ item.body[:90] }}{% if item.body|length > 90 %}…{% endif %}</span><small>{{ format_time(item.received_at) }}</small></a>
+        {% else %}<p class="empty-state">No conversations yet. Choose an announced peer or start a new message.</p>{% endfor %}
+      {% else %}
+        {% for peer in peers %}
+        <a class="chat-list-row{% if peer.destination_hash == selected %} selected{% endif %}" href="{{ url_for('messaging_conversation', key=peer.destination_hash, tab='announces') }}"><strong>{{ peer.contact_name or peer.display_name or short_destination(peer.destination_hash) }}</strong><span class="chat-preview">{{ short_destination(peer.destination_hash) }}</span><small>{{ format_time(peer.last_seen) }} · {% if peer.last_hops == 1 %}Direct{% elif peer.last_hops %}{{ peer.last_hops }} hops{% else %}Hops unavailable{% endif %}</small></a>
+        {% else %}<p class="empty-state">No LXMF delivery announces have been observed yet.</p>{% endfor %}
+      {% endif %}
+    </div>
+    <p class="chat-sidebar-links"><a href="{{ url_for('messaging_contacts') }}">Contacts</a> · <a href="{{ url_for('messaging_identity') }}">My Identity</a></p>
+  </aside>
+  <section class="chat-detail">
+    {% if selected %}
+      <header class="chat-peer-head"><a class="chat-back" href="{{ url_for('messaging', tab=tab) }}">← Back</a><div><h2>{{ contact.name if contact else (peer.display_name if peer and peer.display_name else short_destination(selected)) }}</h2><code title="{{ selected }}">{{ selected }}</code>{% if peer %}<small>{% if peer.last_hops == 1 %}Direct{% elif peer.last_hops %}{{ peer.last_hops }} hops{% else %}Hops unavailable{% endif %} · Announced names are informational, not proof of identity.</small>{% endif %}</div><div class="chat-peer-actions"><button type="button" class="copy-destination" data-destination="{{ selected }}">Copy Destination</button>{% if not contact %}<a class="button" href="{{ url_for('messaging_contacts', destination=selected) }}">Save Contact</a>{% endif %}</div></header>
+      <div class="message-stream">{% for row in rows %}<article class="message-bubble {{ row.direction }}"><div class="message-body">{{ row.body }}</div><small>{{ format_time(row.received_at) }}{% if row.direction == 'outbound' %} · {{ row.delivery_state }}{% endif %}</small>{% if row.direction == 'outbound' and row.delivery_state == 'Failed' and row.error %}<small class="error">{{ row.error }}</small>{% endif %}</article>{% else %}<p class="empty-state">No messages with this peer yet.</p>{% endfor %}</div>
+      <form class="chat-composer" method="post" action="{{ url_for('messaging_conversation', key=selected, tab=tab) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><textarea name="body" maxlength="4000" required placeholder="Send a message…"></textarea><button>Send</button></form>
+    {% else %}
+      <div class="chat-empty"><h2>{{ 'Choose an announced peer' if tab == 'announces' else 'Choose a conversation' }}</h2><p>{{ 'Selecting an announced LXMF destination opens a text-only conversation.' if tab == 'announces' else 'Choose an existing conversation, an announced peer, or start a new message.' }}</p></div>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

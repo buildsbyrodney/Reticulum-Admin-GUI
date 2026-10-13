@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import types
@@ -223,11 +224,112 @@ class MessagingServiceTests(unittest.TestCase):
             if old_lxmf is None: sys.modules.pop("LXMF", None)
             else: sys.modules["LXMF"] = old_lxmf
 
+    def test_lxmf_delivery_announce_is_passively_persisted_and_updated(self):
+        target = "a" * 32
+        class Transport:
+            PATHFINDER_M = 99
+            @staticmethod
+            def hops_to(_): return 3
+        old_rns, old_lxmf = sys.modules.get("RNS"), sys.modules.get("LXMF")
+        sys.modules["RNS"] = types.SimpleNamespace(Transport=Transport)
+        sys.modules["LXMF"] = types.SimpleNamespace(display_name_from_app_data=lambda _: "First announced name")
+        try:
+            service = messaging.Messaging()
+            service.receive_announce(bytes.fromhex(target), types.SimpleNamespace(hash=bytes.fromhex("b" * 32)), b"supported app data")
+            with messaging.connect() as con:
+                row = con.execute("SELECT * FROM announced_peers WHERE destination_hash=?", (target,)).fetchone()
+            self.assertEqual(row["display_name"], "First announced name")
+            self.assertEqual(row["identity_hash"], "b" * 32)
+            self.assertEqual(row["last_hops"], 3)
+            self.assertEqual(row["announce_count"], 1)
+            sys.modules["LXMF"].display_name_from_app_data = lambda _: "Updated announced name"
+            Transport.hops_to = staticmethod(lambda _: 1)
+            service.receive_announce(bytes.fromhex(target), None, b"new supported app data")
+            with messaging.connect() as con:
+                row = con.execute("SELECT * FROM announced_peers WHERE destination_hash=?", (target,)).fetchone()
+            self.assertEqual(row["display_name"], "Updated announced name")
+            self.assertEqual(row["identity_hash"], "b" * 32)
+            self.assertEqual(row["last_hops"], 1)
+            self.assertEqual(row["announce_count"], 2)
+        finally:
+            if old_rns is None: sys.modules.pop("RNS", None)
+            else: sys.modules["RNS"] = old_rns
+            if old_lxmf is None: sys.modules.pop("LXMF", None)
+            else: sys.modules["LXMF"] = old_lxmf
+
+    def test_invalid_announce_metadata_is_safe_and_listener_is_aspect_limited(self):
+        registered = []
+        class Transport:
+            PATHFINDER_M = 99
+            @staticmethod
+            def hops_to(_): return 99
+            @staticmethod
+            def register_announce_handler(handler): registered.append(handler)
+        old_rns, old_lxmf = sys.modules.get("RNS"), sys.modules.get("LXMF")
+        sys.modules["RNS"] = types.SimpleNamespace(Transport=Transport)
+        sys.modules["LXMF"] = types.SimpleNamespace(display_name_from_app_data=lambda _: (_ for _ in ()).throw(ValueError("bad public metadata")))
+        try:
+            service = messaging.Messaging()
+            service.register_announce_listener(sys.modules["RNS"])
+            self.assertEqual(len(registered), 1)
+            self.assertEqual(registered[0].aspect_filter, "lxmf.delivery")
+            registered[0].received_announce(bytes.fromhex("c" * 32), None, b"bad", None)
+            with messaging.connect() as con:
+                row = con.execute("SELECT display_name,last_hops FROM announced_peers").fetchone()
+            self.assertEqual(tuple(row), (None, None))
+            self.assertIsNone(service.router)
+            self.assertIsNone(service.destination)
+        finally:
+            if old_rns is None: sys.modules.pop("RNS", None)
+            else: sys.modules["RNS"] = old_rns
+            if old_lxmf is None: sys.modules.pop("LXMF", None)
+            else: sys.modules["LXMF"] = old_lxmf
+
 class MessagingWebContractTests(unittest.TestCase):
     def test_navigation_and_privacy_contract_are_present(self):
         base = (ROOT / "reticulum-admin" / "templates" / "base.html").read_text(encoding="utf-8")
         inbox = (ROOT / "reticulum-admin" / "templates" / "messaging.html").read_text(encoding="utf-8")
         identity = (ROOT / "reticulum-admin" / "templates" / "messaging_identity.html").read_text(encoding="utf-8")
-        self.assertIn("Messaging", base); self.assertIn("messaging_unread", base); self.assertIn("Messages are private operator content", inbox); self.assertIn("separate from the Bot", identity)
+        self.assertIn("Messaging", base); self.assertIn("messaging_unread", base); self.assertIn("Conversations", inbox); self.assertIn("Announces", inbox); self.assertIn("message-bubble", inbox); self.assertIn("maxlength=\"4000\"", inbox); self.assertNotIn("Add Files", inbox); self.assertNotIn("Add Image", inbox); self.assertNotIn("Add Voice", inbox); self.assertIn("separate from the Bot", identity)
+
+    def test_chat_layout_has_responsive_mobile_and_plain_text_contracts(self):
+        style = (ROOT / "reticulum-admin" / "static" / "app.css").read_text(encoding="utf-8")
+        inbox = (ROOT / "reticulum-admin" / "templates" / "messaging.html").read_text(encoding="utf-8")
+        self.assertIn("@media (max-width: 700px)", style)
+        self.assertIn(".chat-workspace.has-selection .chat-sidebar", style)
+        self.assertIn(".chat-composer", style)
+        self.assertIn("white-space: pre-wrap", style)
+        self.assertIn("Announced names are informational, not proof of identity.", inbox)
+
+    def test_workspace_groups_conversations_and_prefers_contact_then_announce_name(self):
+        old_env = {key: os.environ.get(key) for key in ("APP_DATA", "MESSAGING_DIR", "MESSAGING_REQUEST_DIR", "ADMIN_SECRET_KEY")}
+        old_path = list(sys.path)
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "messaging"
+            original_state, original_requests = messaging.STATE, messaging.REQUESTS
+            messaging.STATE, messaging.REQUESTS = state, Path(temporary) / "requests"
+            try:
+                with messaging.connect() as con:
+                    con.execute("INSERT INTO announced_peers VALUES(?,?,?,?,?,?,?)", ("a" * 32, None, "Announced Alice", 1, 1, 1, 1))
+                    con.execute("INSERT INTO contacts(name,destination,notes,created_at,updated_at) VALUES(?,?,?,?,?)", ("Saved Alice", "a" * 32, None, 1, 1))
+                    con.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", ("first", "a" * 32, "inbound", "a" * 32, "operator", None, "older", 10, None, "Received", None, 10, 10))
+                    con.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", ("newest", "a" * 32, "outbound", "operator", "a" * 32, None, "newest preview", 30, None, "Queued", None, 30, 30))
+                    con.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", ("other", "b" * 32, "inbound", "b" * 32, "operator", None, "other conversation", 20, None, "Received", None, 20, 20))
+                os.environ.update({"APP_DATA": str(Path(temporary) / "admin"), "MESSAGING_DIR": str(state), "MESSAGING_REQUEST_DIR": str(Path(temporary) / "requests"), "ADMIN_SECRET_KEY": "test-secret"})
+                sys.path.insert(0, str(ROOT / "reticulum-admin"))
+                app_spec = importlib.util.spec_from_file_location("messaging_workspace_app", ROOT / "reticulum-admin" / "app.py")
+                app_module = importlib.util.module_from_spec(app_spec); app_spec.loader.exec_module(app_module)
+                rows = app_module.messaging_conversations()
+                self.assertEqual([row["conversation_key"] for row in rows], ["a" * 32, "b" * 32])
+                self.assertEqual(rows[0]["body"], "newest preview")
+                self.assertEqual(rows[0]["contact_name"], "Saved Alice")
+                self.assertEqual(rows[0]["announced_name"], "Announced Alice")
+                self.assertEqual(rows[1]["contact_name"], None)
+            finally:
+                messaging.STATE, messaging.REQUESTS = original_state, original_requests
+                sys.path[:] = old_path
+                for key, value in old_env.items():
+                    if value is None: os.environ.pop(key, None)
+                    else: os.environ[key] = value
 
 if __name__ == "__main__": unittest.main()

@@ -119,6 +119,10 @@ Local mode binds to `127.0.0.1`; network mode binds to `0.0.0.0`. Network mode d
 
 Messaging provides a persistent LXMF identity hosted by the Reticulum Admin node. It can receive and store messages while a desktop or mobile client is offline, and lets an authenticated administrator read and reply from the web interface.
 
+Messaging groups stored messages into Conversations. The Messaging → Announces tab is a separate, chat-oriented directory of recently observed `lxmf.delivery` announces; selecting an announced peer opens a text-only conversation, even before messages have been exchanged. An announced display name is informational only and is not proof of identity. A saved Contact name always takes precedence over an announced name for local presentation. Announce observation is passive: it does not connect, message, save, or trust a peer automatically.
+
+The workspace adapts for phones and iPhone Safari: narrow screens show the conversation/announce list first, then a full-width conversation with a Back control and usable bottom composer. v0.7.1 remains text-only; it does not provide file, image, audio, voice, or other attachments.
+
 If the messaging service restarts while an outbound message is Pending or Queued, it retries that same stored message once when the new service process starts. Delivered and Failed messages are never resent automatically. LXMF 0.9.6 does not provide a durable exactly-once transaction shared with the local message database, so an abrupt crash at the exact delivery boundary can theoretically result in a duplicate network delivery; retrying is preferred to silently losing a queued message.
 
 My Identity is separate from the Test Echo Bot. Messages persist locally under `data/messaging/`; they are not copied into Timeline, Diagnostics, or generic logs. The server must be running to receive direct messages. v0.7.0 does not add phone push notifications, attachments, group chat, or remote administration through LXMF messages. LXMF clients can cache a display name until a later announce or rediscovery.

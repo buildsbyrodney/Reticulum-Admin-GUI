@@ -101,6 +101,17 @@ if ! wait_for 35 sh -c "test -s '$messaging_state/status.json' && grep -q '\"run
 fi
 messaging_destination_before=$(python3 -c "import json; print(json.load(open('$messaging_state/status.json'))['destination'])")
 test "$messaging_destination_before" != "$bot_destination_after"
+# The running service registers the passive lxmf.delivery listener. Inject a
+# supported-format display-name payload through the packaged service helper;
+# this verifies the actual image can persist public peer data without making
+# any connection or configuration action.
+grep -q '"announce_listener_registered": true' "$messaging_state/status.json"
+docker exec "$messaging_container" python -c "import types, messaging; messaging.Messaging().receive_announce(bytes.fromhex('abcdef0123456789abcdef0123456789'), types.SimpleNamespace(hash=bytes.fromhex('1234567890abcdef1234567890abcdef')), b'CI Announced Peer')"
+if ! wait_for 10 python3 -c "import sqlite3; row=sqlite3.connect('$messaging_state/messages.db').execute(\"select destination_hash,announce_count from announced_peers where destination_hash='abcdef0123456789abcdef0123456789'\").fetchone(); assert row and row[1] == 1"; then
+  docker logs "$messaging_container" >&2 || true
+  echo "Messaging service did not persist an LXMF announce" >&2
+  exit 1
+fi
 # A prior process can die after SQLite says Queued but before its in-memory
 # LXMF callback completes. On the next process startup it must be retried,
 # rather than remaining stranded in Queued forever.
@@ -113,6 +124,7 @@ if ! wait_for 35 sh -c "test -s '$messaging_state/status.json' && grep -q '\"run
 fi
 messaging_destination_after=$(python3 -c "import json; print(json.load(open('$messaging_state/status.json'))['destination'])")
 test "$messaging_destination_before" = "$messaging_destination_after"
+python3 -c "import sqlite3; row=sqlite3.connect('$messaging_state/messages.db').execute(\"select destination_hash from announced_peers where destination_hash='abcdef0123456789abcdef0123456789'\").fetchone(); assert row"
 if ! wait_for 15 python3 -c "import sqlite3; row=sqlite3.connect('$messaging_state/messages.db').execute(\"select delivery_state from messages where id='recovery-test'\").fetchone(); assert row and row[0] == 'Failed'"; then
   docker logs "$messaging_container" >&2 || true
   echo "Messaging service left interrupted outbound work stranded" >&2

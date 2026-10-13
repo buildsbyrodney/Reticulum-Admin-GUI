@@ -39,6 +39,15 @@
         button.textContent = "Preparing review…";
       }
     });
+    document.addEventListener("click", function (event) {
+      const button = event.target.closest && event.target.closest(".copy-destination");
+      if (!button || !button.dataset.destination || !navigator.clipboard) return;
+      navigator.clipboard.writeText(button.dataset.destination).then(function () {
+        const original = button.textContent;
+        button.textContent = "Copied";
+        window.setTimeout(function () { button.textContent = original; }, 1400);
+      }).catch(function () {});
+    });
   </script>
 </body>
 </html>

@@ -109,6 +109,47 @@ def messaging_rows(query, values=()):
 def messaging_unread_count():
     rows = messaging_rows("SELECT count(*) AS count FROM messages WHERE direction='inbound' AND read_at IS NULL")
     return rows[0]["count"] if rows else 0
+def short_destination(value):
+    value = str(value or "")
+    return value if len(value) <= 12 else f"{value[:6]}…{value[-6:]}"
+def messaging_conversations(search=""):
+    where, values = "", []
+    if search:
+        needle = f"%{search.lower()}%"
+        where = "AND (lower(m.conversation_key) LIKE ? OR lower(COALESCE(c.name,'')) LIKE ? OR lower(COALESCE(p.display_name,'')) LIKE ?)"
+        values = [needle, needle, needle]
+    return messaging_rows(f"""
+      WITH ranked_messages AS (
+        SELECT messages.*, ROW_NUMBER() OVER (
+          PARTITION BY conversation_key ORDER BY received_at DESC, id DESC
+        ) AS conversation_rank
+        FROM messages
+      )
+      SELECT m.*, c.name AS contact_name, p.display_name AS announced_name,
+        (SELECT count(*) FROM messages unread WHERE unread.conversation_key=m.conversation_key AND unread.direction='inbound' AND unread.read_at IS NULL) AS unread_count
+      FROM ranked_messages m
+      LEFT JOIN contacts c ON c.destination=m.conversation_key
+      LEFT JOIN announced_peers p ON p.destination_hash=m.conversation_key
+      WHERE m.conversation_rank=1 {where}
+      ORDER BY m.received_at DESC LIMIT 100
+    """, values)
+def messaging_announced_peers(search=""):
+    where, values = "", []
+    if search:
+        needle = f"%{search.lower()}%"
+        where = "WHERE lower(p.destination_hash) LIKE ? OR lower(COALESCE(p.display_name,'')) LIKE ? OR lower(COALESCE(c.name,'')) LIKE ?"
+        values = [needle, needle, needle]
+    return messaging_rows(f"""SELECT p.*, c.name AS contact_name FROM announced_peers p LEFT JOIN contacts c ON c.destination=p.destination_hash {where} ORDER BY p.last_seen DESC LIMIT 250""", values)
+def messaging_peer(key):
+    rows = messaging_rows("SELECT p.*, c.name AS contact_name FROM announced_peers p LEFT JOIN contacts c ON c.destination=p.destination_hash WHERE p.destination_hash=?", (key,))
+    return rows[0] if rows else None
+def messaging_workspace(tab="conversations", selected=None, search=""):
+    conversations = messaging_conversations(search) if tab == "conversations" else messaging_conversations()
+    peers = messaging_announced_peers(search) if tab == "announces" else messaging_announced_peers()
+    messages = messaging_rows("SELECT * FROM messages WHERE conversation_key=? ORDER BY received_at", (selected,)) if selected else []
+    contact_rows = messaging_rows("SELECT * FROM contacts WHERE destination=?", (selected,)) if selected else []
+    peer = messaging_peer(selected) if selected else None
+    return {"tab": tab, "search": search, "conversations": conversations, "peers": peers, "selected": selected, "rows": messages, "contact": contact_rows[0] if contact_rows else None, "peer": peer, "status": messaging_status(), "short_destination": short_destination}
 def valid_destination(value): return bool(re.fullmatch(r"[0-9a-fA-F]{32}", value or ""))
 def messaging_request(name, value): atomic_json(MESSAGING_REQUEST_DIR / name, value)
 
@@ -1115,8 +1156,9 @@ def test_echo_bot():
 @app.get("/messaging")
 @login_required
 def messaging():
-    rows = messaging_rows("SELECT m.*, c.name AS contact_name FROM messages m LEFT JOIN contacts c ON c.destination=CASE WHEN m.direction='inbound' THEN m.sender_destination ELSE m.recipient_destination END ORDER BY received_at DESC LIMIT 100")
-    return render_template("messaging.html", title="Messaging", rows=rows, status=messaging_status())
+    tab = request.args.get("tab", "conversations")
+    if tab not in ("conversations", "announces"): tab = "conversations"
+    return render_template("messaging.html", title="Messaging", **messaging_workspace(tab=tab, search=request.args.get("q", "").strip()[:80]))
 
 @app.route("/messaging/new", methods=["GET", "POST"])
 @login_required
@@ -1140,20 +1182,21 @@ def messaging_new():
 @login_required
 def messaging_conversation(key):
     if not valid_destination(key): abort(404)
+    tab = request.args.get("tab", "conversations")
+    if tab not in ("conversations", "announces"): tab = "conversations"
     if request.method == "POST":
         require_csrf(); body = request.form.get("body", "")
         if not body.strip() or len(body) > 4000: flash("Enter a message of 1–4,000 characters.", "error")
         else:
             message_id = secrets.token_hex(16); messaging_request(f"outbound-{message_id}.json", {"id": message_id, "destination": key, "body": body})
             flash("Reply queued. It may remain queued until Reticulum has a route.", "success")
-            return redirect(url_for("messaging_conversation", key=key))
-    rows = messaging_rows("SELECT * FROM messages WHERE conversation_key=? ORDER BY received_at", (key,))
-    if rows:
+            return redirect(url_for("messaging_conversation", key=key, tab=tab))
+    context = messaging_workspace(tab=tab, selected=key)
+    if context["rows"]:
         # Read state is operator UI data; the messaging service remains the
         # sole writer to the message database, so mark-read is a request too.
         messaging_request(f"read-{key}.json", {"conversation_key": key})
-    contact = messaging_rows("SELECT * FROM contacts WHERE destination=?", (key,))
-    return render_template("messaging_conversation.html", title="Conversation", key=key, rows=rows, contact=contact[0] if contact else None)
+    return render_template("messaging.html", title="Conversation", **context)
 
 @app.route("/messaging/contacts", methods=["GET", "POST"])
 @login_required
@@ -1166,7 +1209,9 @@ def messaging_contacts():
         else:
             messaging_request(f"contact-save-{secrets.token_hex(8)}.json", {"destination": destination, "name": request.form["name"].strip()[:100], "notes": request.form.get("notes", "").strip()[:500]}); flash("Contact save requested.", "success")
         return redirect(url_for("messaging_contacts"))
-    return render_template("messaging_contacts.html", title="Contacts", rows=messaging_rows("SELECT * FROM contacts ORDER BY name COLLATE NOCASE"))
+    destination = request.args.get("destination", "").strip().lower()
+    peer = messaging_peer(destination) if valid_destination(destination) else None
+    return render_template("messaging_contacts.html", title="Contacts", rows=messaging_rows("SELECT * FROM contacts ORDER BY name COLLATE NOCASE"), prefill_destination=destination if valid_destination(destination) else "", prefill_name=(peer or {}).get("display_name", ""))
 
 @app.route("/messaging/identity", methods=["GET", "POST"])
 @login_required
