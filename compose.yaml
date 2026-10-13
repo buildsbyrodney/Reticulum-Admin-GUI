@@ -79,6 +79,8 @@ services:
       - ./data/admin:/var/lib/reticulum-admin
       - ./data/bot-status:/bot-status:ro
       - ./data/bot-config:/bot-config
+      - ./data/messaging:/messaging:ro
+      - ./data/messaging-requests:/messaging-requests
     networks: [default, management]
 
   lxmf-test-bot:
@@ -102,6 +104,23 @@ services:
       - ./data/bot:/bot
       - ./data/bot-status:/status
       - ./data/bot-config:/config
+
+  lxmf-messaging:
+    build: ./lxmf-messaging
+    restart: unless-stopped
+    depends_on:
+      rnsd:
+        condition: service_started
+    # The local Reticulum shared-instance socket is namespace-local. This
+    # service publishes no ports and has only a read-only Reticulum mount.
+    network_mode: host
+    environment:
+      MESSAGING_STATE_DIR: /messaging
+      MESSAGING_REQUEST_DIR: /requests
+    volumes:
+      - ./data/reticulum:/reticulum:ro
+      - ./data/messaging:/messaging
+      - ./data/messaging-requests:/requests
 
 networks:
   management:

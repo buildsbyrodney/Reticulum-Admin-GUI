@@ -51,7 +51,10 @@ fi
 # Update flow also retains the release filename and extracts successfully.
 mkdir -p "$WORK/update"
 cp "$WORK/published/$ARCHIVE_NAME" "$WORK/published/$CHECKSUM_NAME" "$WORK/update/"
+mkdir -p "$WORK/update-extracted/data/messaging"
+printf '%s\n' 'persistent-messaging-identity' > "$WORK/update-extracted/data/messaging/identity"
 verify_and_extract "$WORK/update" "$WORK/update-extracted"
+test "$(cat "$WORK/update-extracted/data/messaging/identity")" = "persistent-messaging-identity"
 
 # Keep the test coupled to the installer call sites, not just an equivalent flow.
 grep -F "fetch_release \"\$TMPDIR_INSTALL/\$ARCHIVE_NAME\" \"\$TMPDIR_INSTALL/\$CHECKSUM_NAME\"" "$ROOT/install.sh" >/dev/null
