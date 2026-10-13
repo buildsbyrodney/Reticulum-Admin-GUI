@@ -242,6 +242,12 @@ class MessagingServiceTests(unittest.TestCase):
             self.assertEqual(row["identity_hash"], "b" * 32)
             self.assertEqual(row["last_hops"], 3)
             self.assertEqual(row["announce_count"], 1)
+            Transport.hops_to = staticmethod(lambda _: Transport.PATHFINDER_M)
+            service.receive_announce(bytes.fromhex(target), None, b"app data without a route")
+            with messaging.connect() as con:
+                row = con.execute("SELECT * FROM announced_peers WHERE destination_hash=?", (target,)).fetchone()
+            self.assertIsNone(row["last_hops"])
+            self.assertEqual(row["announce_count"], 2)
             sys.modules["LXMF"].display_name_from_app_data = lambda _: "Updated announced name"
             Transport.hops_to = staticmethod(lambda _: 1)
             service.receive_announce(bytes.fromhex(target), None, b"new supported app data")
@@ -250,7 +256,7 @@ class MessagingServiceTests(unittest.TestCase):
             self.assertEqual(row["display_name"], "Updated announced name")
             self.assertEqual(row["identity_hash"], "b" * 32)
             self.assertEqual(row["last_hops"], 1)
-            self.assertEqual(row["announce_count"], 2)
+            self.assertEqual(row["announce_count"], 3)
         finally:
             if old_rns is None: sys.modules.pop("RNS", None)
             else: sys.modules["RNS"] = old_rns
@@ -300,6 +306,7 @@ class MessagingWebContractTests(unittest.TestCase):
         self.assertIn(".chat-composer", style)
         self.assertIn("white-space: pre-wrap", style)
         self.assertIn("Announced names are informational, not proof of identity.", inbox)
+        self.assertIn("stream.scrollTop = stream.scrollHeight", inbox)
 
     def test_workspace_groups_conversations_and_prefers_contact_then_announce_name(self):
         old_env = {key: os.environ.get(key) for key in ("APP_DATA", "MESSAGING_DIR", "MESSAGING_REQUEST_DIR", "ADMIN_SECRET_KEY")}

@@ -84,7 +84,7 @@ class Messaging:
             except Exception: hops = None
             stamp = int(time.time())
             with connect() as con:
-                con.execute("INSERT INTO announced_peers(destination_hash,identity_hash,display_name,first_seen,last_seen,last_hops,announce_count) VALUES(?,?,?,?,?,?,1) ON CONFLICT(destination_hash) DO UPDATE SET identity_hash=COALESCE(excluded.identity_hash,announced_peers.identity_hash),display_name=COALESCE(excluded.display_name,announced_peers.display_name),last_seen=excluded.last_seen,last_hops=COALESCE(excluded.last_hops,announced_peers.last_hops),announce_count=announced_peers.announce_count+1", (destination.lower(), identity_hash, display_name, stamp, stamp, hops))
+                con.execute("INSERT INTO announced_peers(destination_hash,identity_hash,display_name,first_seen,last_seen,last_hops,announce_count) VALUES(?,?,?,?,?,?,1) ON CONFLICT(destination_hash) DO UPDATE SET identity_hash=COALESCE(excluded.identity_hash,announced_peers.identity_hash),display_name=COALESCE(excluded.display_name,announced_peers.display_name),last_seen=excluded.last_seen,last_hops=excluded.last_hops,announce_count=announced_peers.announce_count+1", (destination.lower(), identity_hash, display_name, stamp, stamp, hops))
         except Exception:
             # Announces are advisory public metadata. A malformed announce must
             # never interrupt messaging or expose private diagnostic details.
