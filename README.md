@@ -53,6 +53,8 @@ VERSE or VERSE John 3:16 → curated local KJV verse
 
 The bot announces on startup and every 60 minutes by default; the GUI enforces a 15-minute minimum periodic interval. It stores only operational metadata such as counters and timestamps, not message bodies. After updating on a Pi: announce the bot, add or discover the destination in MeshChat, send `PING`, restart only `lxmf-test-bot`, confirm its destination is unchanged, and send `PING` again. Test remote peers through a known route only after local VM messaging succeeds.
 
+The Bot settings include an announce tagline for future compatible LXMF runtimes. The pinned LXMF 0.9.6 runtime sends the normal Unicode display name but does **not** support transmitting a separate tagline in its announce API, so clients may show only the display name.
+
 **Supported by design:** native Linux with Docker Engine and Docker Compose v2 on `x86_64`, `aarch64`, and `arm64`. Primary target distributions are Debian 12/13, Raspberry Pi OS 64-bit where practical, and Ubuntu Server. The managed `rnsd` service uses Linux host networking so it can bind real host interfaces; Docker Desktop and WSL do not provide the required equivalent behavior. **Raspberry Pi 3 ARM64 has been physically validated through successful container build and stack start on Debian 64-bit, with Docker 29.9.0, Docker Compose 5.6.0, and Reticulum rns 1.5.7.**
 
 ## Install on Ubuntu/Linux

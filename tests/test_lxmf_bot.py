@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 BOT_PATH = ROOT / "lxmf-test-bot" / "bot.py"
+BOT_STATUS_FIXTURE = ROOT / "tests" / "fixtures" / "rnstatus-1.5.7-bot-status.json"
 sys.path.insert(0, str(BOT_PATH.parent))
 spec = importlib.util.spec_from_file_location("echo_bot", BOT_PATH)
 bot = importlib.util.module_from_spec(spec); spec.loader.exec_module(bot)
@@ -115,6 +116,20 @@ class EchoBotTests(unittest.TestCase):
                 self.assertEqual(instance.counters["messages_received"], 0)
                 self.assertEqual(instance.counters["replies_sent"], 0)
             finally: bot.CONFIG = old
+
+    def test_real_pi_transport_id_and_tcp_server_count_are_reported(self):
+        old = bot.RUNTIME_STATUS; bot.RUNTIME_STATUS = BOT_STATUS_FIXTURE
+        try:
+            status = bot.EchoBot().safe_status()
+            self.assertEqual(status["transport"], "On")
+            self.assertEqual(status["clients"], 1)
+            self.assertEqual(status["client_summary"], "TCP clients: 1")
+        finally: bot.RUNTIME_STATUS = old
+
+    def test_pinned_lxmf_announce_does_not_use_unsupported_tagline_payload(self):
+        source = BOT_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("app_data=tagline", source)
+        self.assertIn("LXMF 0.9.6 announces accept only", source)
 
     def test_bot_uses_the_rnsd_host_network_namespace_without_exposing_ports(self):
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")

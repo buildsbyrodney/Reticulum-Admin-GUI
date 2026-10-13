@@ -12,6 +12,7 @@ MIN_INTERVAL = 15
 STATE = Path(os.environ.get("BOT_STATE_DIR", "/bot"))
 STATUS = Path(os.environ.get("BOT_STATUS_DIR", "/status"))
 CONFIG = Path(os.environ.get("BOT_CONFIG_DIR", "/config"))
+RUNTIME_STATUS = Path(os.environ.get("RETICULUM_STATUS_PATH", "/reticulum/admin-status/snapshot.json"))
 
 DEFAULTS = {"enabled": True, "display_name": "Reticulum Admin Test Bot", "tagline": "Send HELP for commands", "announce_on_startup": True, "periodic_announce": True, "interval_minutes": 60, "rate_limit_per_minute": 12}
 MAX_INPUT = 500
@@ -107,13 +108,16 @@ class EchoBot:
     def activity(self, text):
         self.counters["activity"] = [{"at": int(time.time()), "message": text}] + self.counters["activity"][:19]
     def safe_status(self):
-        try: snapshot = json.loads((Path("/reticulum/admin-status/snapshot.json")).read_text(encoding="utf-8"))
+        try: snapshot = json.loads(RUNTIME_STATUS.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError): snapshot = {}
         status = snapshot.get("status") or {}; interfaces = status.get("interfaces") or []
         active = [row for row in interfaces if row.get("status") is True]
         names = [f"- {row.get('short_name') or row.get('name')}: Up" for row in active[:8]]
-        clients = sum((row.get("clients") or 0) for row in interfaces)
-        return {"transport": "On" if bool(status.get("transport_instance") or status.get("transport_enabled")) else "Off", "paths": len(snapshot.get("paths") or []), "interfaces": len(active), "clients": clients, "uptime": self.uptime(), "interface_summary": "Interfaces\n" + ("\n".join(names) if names else "No active interfaces reported."), "client_summary": f"TCP clients: {clients}", "path_summary": f"Known paths: {len(snapshot.get('paths') or [])}"}
+        # LocalServerInterface.clients counts shared-instance programs, not
+        # inbound TCP peers. Only a TCP server reports the latter directly.
+        clients = sum((row.get("clients") or 0) for row in interfaces if row.get("type") == "TCPServerInterface")
+        transport_active = bool(status.get("transport_id") or status.get("transport_instance") or status.get("transport_enabled"))
+        return {"transport": "On" if transport_active else "Off", "paths": len(snapshot.get("paths") or []), "interfaces": len(active), "clients": clients, "uptime": self.uptime(), "interface_summary": "Interfaces\n" + ("\n".join(names) if names else "No active interfaces reported."), "client_summary": f"TCP clients: {clients}", "path_summary": f"Known paths: {len(snapshot.get('paths') or [])}"}
     def uptime(self):
         seconds = int(time.time()) - self.started_at
         hours, minutes = divmod(seconds // 60, 60)
@@ -137,11 +141,10 @@ class EchoBot:
             **self.counters,
         })
     def announce(self, reason):
-        # Newer LXMF versions can carry app_data with an announce. Reticulum
-        # 1.5.7 clients still get the stable delivery destination if they ignore it.
-        tagline = read_settings()["tagline"].encode("utf-8")[:160]
-        try: self.router.announce(self.destination.hash, app_data=tagline)
-        except TypeError: self.router.announce(self.destination.hash)
+        # LXMF 0.9.6 announces accept only a destination hash/interface.
+        # Keep the local tagline for a future compatible runtime; never fake
+        # unsupported announce payload formatting on the wire.
+        self.router.announce(self.destination.hash)
         self.counters["last_announce"] = int(time.time()); self.activity(f"{reason} announce sent")
     def allowed_sender(self, source_hash):
         key = source_hash.hex() if hasattr(source_hash, "hex") else str(source_hash)

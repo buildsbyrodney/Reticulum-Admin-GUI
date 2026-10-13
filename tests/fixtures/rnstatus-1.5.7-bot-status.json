@@ -1,0 +1,10 @@
+{
+  "status": {
+    "transport_id": "9d73ddbc224d155ef7f761e1b1e8ff0e",
+    "interfaces": [
+      {"name": "Shared Instance[rns/default]", "short_name": "Reticulum", "type": "LocalServerInterface", "clients": 1, "status": true},
+      {"name": "TCPServerInterface[VM Access/192.168.1.85:4243]", "short_name": "VM Access", "type": "TCPServerInterface", "clients": 1, "status": true}
+    ]
+  },
+  "paths": []
+}

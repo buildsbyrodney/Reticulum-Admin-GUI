@@ -66,6 +66,9 @@ bot_destination_before=$(python3 -c "import json; print(json.load(open('$bot_sta
 # the image contents (rather than only host unit tests) and confirms Unicode
 # source files survive the image build.
 docker exec "$bot_container" python -c 'from bot import CommandProcessor, TEST; p=CommandProcessor(lambda: {"transport":"On","paths":2,"interfaces":1,"clients":0,"uptime":"0m"}); assert "Diagnostics" in p.reply("MENU"); assert p.reply("TEST") in TEST; assert "John 3:16 KJV" in p.reply("VERSE John 3:16")'
+# The pinned runtime has no compatible app_data argument on LXMRouter.announce;
+# Bot v2 deliberately retains the local tagline without attempting to inject it.
+docker exec "$bot_container" python -c 'import inspect, LXMF; assert list(inspect.signature(LXMF.LXMRouter.announce).parameters) == ["self", "destination_hash", "attached_interface"]'
 printf '%s' '{"display_name":"W4OWE Test Bot 🤖","tagline":"Send HELP for commands"}' > "$bot_config/settings.json"
 docker restart "$bot_container" >/dev/null
 if ! wait_for 35 sh -c "test -s '$bot_status/status.json' && grep -q 'W4OWE Test Bot' '$bot_status/status.json'"; then

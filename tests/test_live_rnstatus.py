@@ -101,7 +101,7 @@ class LiveRnstatusTests(unittest.TestCase):
 
     def test_bot_v2_page_explains_local_read_only_commands_and_tagline(self):
         page = self.client().get("/diagnostics/bot").get_data(as_text=True)
-        for expected in ("Announce Tagline", "Send HELP for commands", "MENU", "VERSE John 3:16", "read-only", "never grants remote Admin GUI access"):
+        for expected in ("Announce Tagline", "Send HELP for commands", "MENU", "VERSE John 3:16", "read-only", "never grants remote Admin GUI access", "does not transmit an announce tagline"):
             self.assertIn(expected, page)
 
     def test_configured_interface_is_merged_and_system_interfaces_are_read_only(self):
