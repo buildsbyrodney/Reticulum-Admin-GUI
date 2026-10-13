@@ -101,6 +101,10 @@ if ! wait_for 35 sh -c "test -s '$messaging_state/status.json' && grep -q '\"run
 fi
 messaging_destination_before=$(python3 -c "import json; print(json.load(open('$messaging_state/status.json'))['destination'])")
 test "$messaging_destination_before" != "$bot_destination_after"
+# A prior process can die after SQLite says Queued but before its in-memory
+# LXMF callback completes. On the next process startup it must be retried,
+# rather than remaining stranded in Queued forever.
+python3 -c "import sqlite3; con=sqlite3.connect('$messaging_state/messages.db'); con.execute(\"insert into messages(id,conversation_key,direction,sender_destination,recipient_destination,body,received_at,delivery_state,created_at,updated_at) values ('recovery-test','fedcba9876543210fedcba9876543210','outbound','operator','fedcba9876543210fedcba9876543210','actual image interrupted queue recovery',1,'Queued',1,1)\"); con.commit()"
 docker restart "$messaging_container" >/dev/null
 if ! wait_for 35 sh -c "test -s '$messaging_state/status.json' && grep -q '\"running\": true' '$messaging_state/status.json'"; then
   docker logs "$messaging_container" >&2 || true
@@ -109,6 +113,11 @@ if ! wait_for 35 sh -c "test -s '$messaging_state/status.json' && grep -q '\"run
 fi
 messaging_destination_after=$(python3 -c "import json; print(json.load(open('$messaging_state/status.json'))['destination'])")
 test "$messaging_destination_before" = "$messaging_destination_after"
+if ! wait_for 15 python3 -c "import sqlite3; row=sqlite3.connect('$messaging_state/messages.db').execute(\"select delivery_state from messages where id='recovery-test'\").fetchone(); assert row and row[0] == 'Failed'"; then
+  docker logs "$messaging_container" >&2 || true
+  echo "Messaging service left interrupted outbound work stranded" >&2
+  exit 1
+fi
 printf '%s' '{"id":"outbound-test","destination":"0123456789abcdef0123456789abcdef","body":"actual image outbound persistence"}' > "$messaging_requests/outbound-outbound-test.json"
 if ! wait_for 10 python3 -c "import os, sqlite3; row=sqlite3.connect('$messaging_state/messages.db').execute(\"select body,conversation_key,delivery_state from messages where id='outbound-test'\").fetchone(); assert row and row[0] == 'actual image outbound persistence' and row[1] == '0123456789abcdef0123456789abcdef' and row[2] in ('Queued','Delivered','Failed') and not os.path.exists('$messaging_requests/outbound-outbound-test.json')"; then
   docker logs "$messaging_container" >&2 || true

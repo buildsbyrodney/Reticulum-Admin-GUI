@@ -9,6 +9,7 @@ DEFAULTS = {"enabled": True, "display_name": "Reticulum Admin User", "announce_o
 MIN_INTERVAL, MAX_BODY = 15, 4000
 PATH_LOOKUP_SECONDS = max(1, min(30, int(os.environ.get("MESSAGING_PATH_LOOKUP_SECONDS", "10"))))
 DESTINATION_RE = re.compile(r"[0-9a-fA-F]{32}")
+TERMINAL_OUTBOUND_STATES = {"Delivered", "Failed"}
 
 def atomic_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True); tmp = path.with_suffix(path.suffix + ".tmp")
@@ -35,6 +36,10 @@ def connect():
 class Messaging:
     def __init__(self):
         self.router = self.destination = self.identity = None; self.started = int(time.time())
+        # In-memory marker for this process only. A fresh process deliberately
+        # retries interrupted Pending/Queued rows once, since LXMF callbacks
+        # do not survive a service restart.
+        self.session_id = uuid.uuid4().hex; self.inflight_message_ids = set()
         self.state = {"last_message_received": None, "last_message_sent": None, "last_error": None, "last_announce": None}
     def status(self, ready=False):
         with connect() as con: pending = con.execute("SELECT count(*) FROM messages WHERE direction='outbound' AND delivery_state IN ('Pending','Queued')").fetchone()[0]
@@ -64,15 +69,40 @@ class Messaging:
         elif delivery_state == "Failed":
             self.state["last_error"] = "Last outbound message could not be sent"
 
-    def send(self, item):
-        message_id, target, body = item.get("id"), item.get("destination", ""), item.get("body", "")[:MAX_BODY]
-        if not message_id or not DESTINATION_RE.fullmatch(target) or not body.strip(): return False
-        stamp = int(time.time())
-        # Requests are intentionally idempotent. A request replay after a
-        # committed insert is handled without another send attempt.
+    def recover_interrupted_outbound(self):
+        """Retry non-terminal work once after this service process starts.
+
+        LXMF 0.9.6 delivery callbacks are in-memory, so an abrupt service
+        stop cannot tell us whether a previously Queued message completed.
+        Retrying on the next process is preferable to silently stranding it.
+        It can theoretically cause a duplicate network delivery in the tiny
+        crash-at-delivery window; the SQLite row itself remains exactly once.
+        """
         with connect() as con:
-            created = con.execute("INSERT OR IGNORE INTO messages(id,conversation_key,direction,sender_destination,recipient_destination,body,received_at,delivery_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (message_id, target.lower(), "outbound", self.destination.hash.hex() if self.destination else None, target.lower(), body, stamp, "Pending", stamp, stamp)).rowcount
-            if not created: return True
+            rows = con.execute("SELECT id,recipient_destination,body FROM messages WHERE direction='outbound' AND delivery_state IN ('Pending','Queued') ORDER BY created_at").fetchall()
+        for row in rows:
+            self.send({"id": row["id"], "destination": row["recipient_destination"], "body": row["body"]}, recovering=True)
+
+    def send(self, item, recovering=False):
+        message_id, target, body = item.get("id"), item.get("destination", ""), item.get("body", "")[:MAX_BODY]
+        stamp = int(time.time())
+        with connect() as con:
+            existing = con.execute("SELECT delivery_state,recipient_destination,body FROM messages WHERE id=?", (message_id,)).fetchone() if message_id else None
+            if existing:
+                if existing["delivery_state"] in TERMINAL_OUTBOUND_STATES or message_id in self.inflight_message_ids:
+                    return True
+                # Only explicit startup recovery is allowed to resubmit an
+                # existing non-terminal record. Normal request-file replay in
+                # this process must never double-send it.
+                if not recovering: return True
+                target, body = existing["recipient_destination"], existing["body"]
+            elif not message_id or not DESTINATION_RE.fullmatch(target) or not body.strip():
+                return False
+            else:
+                con.execute("INSERT INTO messages(id,conversation_key,direction,sender_destination,recipient_destination,body,received_at,delivery_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (message_id, target.lower(), "outbound", self.destination.hash.hex() if self.destination else None, target.lower(), body, stamp, "Pending", stamp, stamp))
+        if not DESTINATION_RE.fullmatch(target) or not body.strip():
+            self.update_outbound(message_id, "Failed", "Stored outbound message is invalid.")
+            return True
         try:
             import RNS, LXMF
             destination_hash = bytes.fromhex(target)
@@ -96,6 +126,7 @@ class Messaging:
             # Router acceptance only means LXMF has queued the message. The
             # delivery callback is the sole source of a Delivered state.
             with connect() as con: con.execute("UPDATE messages SET delivery_state='Queued',updated_at=? WHERE id=?", (stamp, message_id))
+            self.inflight_message_ids.add(message_id)
             self.router.handle_outbound(outbound)
         except Exception:
             self.update_outbound(message_id, "Failed", "LXMF submission failed.")
@@ -137,13 +168,15 @@ class Messaging:
         self.identity = RNS.Identity.from_file(str(identity_file)) if identity_file.exists() else RNS.Identity()
         if not identity_file.exists(): self.identity.to_file(str(identity_file)); os.chmod(identity_file, 0o600)
         self.router = LXMF.LXMRouter(storagepath=str(STATE / "lxmf")); self.destination = self.router.register_delivery_identity(self.identity, display_name=settings()["display_name"]); self.router.register_delivery_callback(self.receive)
-        announced, last_periodic, previous_name = False, 0, settings()["display_name"]
+        announced, last_periodic, previous_name, recovery_attempted = False, 0, settings()["display_name"], False
         while True:
             try:
                 current, current_settings = time.time(), settings()
                 if current_settings["display_name"] != previous_name:
                     if hasattr(self.destination, "display_name"): self.destination.display_name = current_settings["display_name"]
                     self.announce(); previous_name = current_settings["display_name"]
+                if current_settings["enabled"] and not recovery_attempted:
+                    self.recover_interrupted_outbound(); recovery_attempted = True
                 if current_settings["enabled"] and current_settings["announce_on_startup"] and not announced: self.announce(); announced = True; last_periodic = current
                 if current_settings["enabled"] and current_settings["periodic_announce"] and current-last_periodic >= current_settings["interval_minutes"]*60: self.announce(); last_periodic = current
                 if current_settings["enabled"]: self.process_requests()

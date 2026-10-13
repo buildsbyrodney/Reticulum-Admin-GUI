@@ -122,6 +122,48 @@ class MessagingServiceTests(unittest.TestCase):
             else: sys.modules["RNS"] = old_rns
             if old_lxmf is None: sys.modules.pop("LXMF", None)
             else: sys.modules["LXMF"] = old_lxmf
+
+    def test_new_process_recovers_pending_and_queued_rows_but_not_terminal_rows(self):
+        target = "b" * 32; submitted = []
+        class Identity:
+            @staticmethod
+            def recall(_): return object()
+        class Destination:
+            OUT = SINGLE = 1
+            def __init__(self, *args): pass
+        class LXMessage:
+            DIRECT = "direct"
+            def __init__(self, *args, **kwargs): self.content = args[2]; self.delivery = self.failed = None
+            def register_delivery_callback(self, callback): self.delivery = callback
+            def register_failed_callback(self, callback): self.failed = callback
+        old_rns, old_lxmf = sys.modules.get("RNS"), sys.modules.get("LXMF")
+        sys.modules["RNS"] = types.SimpleNamespace(Identity=Identity, Transport=types.SimpleNamespace(request_path=lambda _: None), Destination=Destination)
+        sys.modules["LXMF"] = types.SimpleNamespace(LXMessage=LXMessage)
+        try:
+            first_process = messaging.Messaging()
+            stamp = 1
+            with messaging.connect() as con:
+                for message_id, state, body in [("pending", "Pending", "retry pending"), ("queued", "Queued", "retry queued"), ("delivered", "Delivered", "do not retry"), ("failed", "Failed", "do not retry")]:
+                    con.execute("INSERT INTO messages(id,conversation_key,direction,sender_destination,recipient_destination,body,received_at,delivery_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (message_id, target, "outbound", "operator", target, body, stamp, state, stamp, stamp))
+            recovered_process = messaging.Messaging()
+            self.assertNotEqual(first_process.session_id, recovered_process.session_id)
+            recovered_process.destination = types.SimpleNamespace(hash=b"operator")
+            recovered_process.router = types.SimpleNamespace(handle_outbound=lambda item: submitted.append(item))
+            recovered_process.recover_interrupted_outbound()
+            self.assertEqual([message.content for message in submitted], ["retry pending", "retry queued"])
+            with messaging.connect() as con:
+                rows = {row["id"]: row for row in con.execute("SELECT id,conversation_key,body,delivery_state FROM messages")}
+            self.assertEqual(rows["pending"]["conversation_key"], target); self.assertEqual(rows["queued"]["body"], "retry queued")
+            self.assertEqual(rows["pending"]["delivery_state"], "Queued"); self.assertEqual(rows["queued"]["delivery_state"], "Queued")
+            self.assertEqual(rows["delivered"]["delivery_state"], "Delivered"); self.assertEqual(rows["failed"]["delivery_state"], "Failed")
+            # Callback after a restart recovery updates the original durable row.
+            submitted[1].delivery(submitted[1])
+            with messaging.connect() as con: self.assertEqual(con.execute("SELECT delivery_state FROM messages WHERE id='queued'").fetchone()[0], "Delivered")
+        finally:
+            if old_rns is None: sys.modules.pop("RNS", None)
+            else: sys.modules["RNS"] = old_rns
+            if old_lxmf is None: sys.modules.pop("LXMF", None)
+            else: sys.modules["LXMF"] = old_lxmf
     def test_settings_enforce_conservative_interval(self):
         messaging.atomic_json(messaging.REQUESTS / "settings.json", {"display_name": "W4OWE User 🤖", "interval_minutes": 1})
         value = messaging.settings(); self.assertEqual(value["display_name"], "W4OWE User 🤖"); self.assertEqual(value["interval_minutes"], 15)
