@@ -115,6 +115,12 @@ Local mode binds to `127.0.0.1`; network mode binds to `0.0.0.0`. Network mode d
 
 ## Operations
 
+## Messaging
+
+Messaging provides a persistent LXMF identity hosted by the Reticulum Admin node. It can receive and store messages while a desktop or mobile client is offline, and lets an authenticated administrator read and reply from the web interface.
+
+My Identity is separate from the Test Echo Bot. Messages persist locally under `data/messaging/`; they are not copied into Timeline, Diagnostics, or generic logs. The server must be running to receive direct messages. v0.7.0 does not add phone push notifications, attachments, group chat, or remote administration through LXMF messages. LXMF clients can cache a display name until a later announce or rediscovery.
+
 ```sh
 docker compose ps
 docker compose logs -f rnsd

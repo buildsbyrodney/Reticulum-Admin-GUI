@@ -23,6 +23,8 @@ DB_PATH = APP_DATA / "admin.db"
 RETICULUM_DIR = Path(os.environ.get("RETICULUM_DIR", "/reticulum"))
 BOT_STATUS_DIR = Path(os.environ.get("BOT_STATUS_DIR", "/bot-status"))
 BOT_CONFIG_DIR = Path(os.environ.get("BOT_CONFIG_DIR", "/bot-config"))
+MESSAGING_DIR = Path(os.environ.get("MESSAGING_DIR", "/messaging"))
+MESSAGING_REQUEST_DIR = Path(os.environ.get("MESSAGING_REQUEST_DIR", "/messaging-requests"))
 TIMEZONE_NAME = os.environ.get("SERVER_TIMEZONE", "America/Chicago")
 try:
     SERVER_TIMEZONE = ZoneInfo(TIMEZONE_NAME)
@@ -88,12 +90,34 @@ def bot_status():
     try: return json.loads((BOT_STATUS_DIR / "status.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError): return {"running": False, "shared_instance_connected": False, "lxmf_router_ready": False, "error": "Bot has not reported status yet."}
 
+MESSAGING_DEFAULTS = {"enabled": True, "display_name": "Reticulum Admin User", "announce_on_startup": True, "periodic_announce": False, "interval_minutes": 60}
+def messaging_status():
+    try: return json.loads((MESSAGING_DIR / "status.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError): return {"running": False, "shared_instance_connected": False, "lxmf_router_ready": False, "error": "Messaging service has not reported status yet."}
+def messaging_settings():
+    try: value = json.loads((MESSAGING_REQUEST_DIR / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError): value = {}
+    return {**MESSAGING_DEFAULTS, **{key: value[key] for key in MESSAGING_DEFAULTS if key in value}}
+def messaging_con():
+    return sqlite3.connect(f"file:{MESSAGING_DIR / 'messages.db'}?mode=ro", uri=True, timeout=2)
+def messaging_rows(query, values=()):
+    try:
+        with messaging_con() as con:
+            con.row_factory = sqlite3.Row
+            return [dict(row) for row in con.execute(query, values).fetchall()]
+    except sqlite3.Error: return []
+def messaging_unread_count():
+    rows = messaging_rows("SELECT count(*) AS count FROM messages WHERE direction='inbound' AND read_at IS NULL")
+    return rows[0]["count"] if rows else 0
+def valid_destination(value): return bool(re.fullmatch(r"[0-9a-fA-F]{32}(?:[0-9a-fA-F]{32})?", value or ""))
+def messaging_request(name, value): atomic_json(MESSAGING_REQUEST_DIR / name, value)
+
 def csrf_token():
     session.setdefault("csrf", secrets.token_urlsafe(32)); return session["csrf"]
 
 @app.context_processor
 def common_values():
-    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.6.2")}
+    return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "messaging_unread": messaging_unread_count(), "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.6.2")}
 
 def require_csrf():
     if not secrets.compare_digest(session.get("csrf", ""), request.form.get("csrf_token", "")): abort(400, "Invalid form token")
@@ -1087,6 +1111,79 @@ def test_echo_bot():
             settings["enabled"] = False; atomic_json(BOT_CONFIG_DIR / "settings.json", settings); audit("bot_disabled", "Test Echo Bot disabled"); flash("Bot disabled; its identity is preserved.", "success")
         return redirect(url_for("test_echo_bot"))
     return render_template("bot.html", title="Test Echo Bot", settings=bot_settings(), status=bot_status())
+
+@app.get("/messaging")
+@login_required
+def messaging():
+    rows = messaging_rows("SELECT m.*, c.name AS contact_name FROM messages m LEFT JOIN contacts c ON c.destination=CASE WHEN m.direction='inbound' THEN m.sender_destination ELSE m.recipient_destination END ORDER BY received_at DESC LIMIT 100")
+    return render_template("messaging.html", title="Messaging", rows=rows, status=messaging_status())
+
+@app.route("/messaging/new", methods=["GET", "POST"])
+@login_required
+def messaging_new():
+    if request.method == "POST":
+        require_csrf(); destination = (request.form.get("destination", "") or request.form.get("destination_value", "")).strip().lower(); body = request.form.get("body", "")
+        if not valid_destination(destination): flash("Destination hash must be 32 or 64 hexadecimal characters.", "error")
+        elif not body.strip(): flash("Message body cannot be empty.", "error")
+        elif len(body) > 4000: flash("Message body must be 4,000 characters or fewer.", "error")
+        else:
+            message_id, stamp = secrets.token_hex(16), now()
+            # The service owns delivery and records its outcome. The web app
+            # only creates an intentionally narrow outbound request.
+            messaging_request(f"outbound-{message_id}.json", {"id": message_id, "destination": destination, "body": body})
+            flash("Message queued for the Messaging service. Delivery is not confirmed yet.", "success")
+            return redirect(url_for("messaging_conversation", key=destination))
+    contacts = messaging_rows("SELECT * FROM contacts ORDER BY name COLLATE NOCASE")
+    return render_template("messaging_new.html", title="New Message", contacts=contacts)
+
+@app.route("/messaging/conversations/<key>", methods=["GET", "POST"])
+@login_required
+def messaging_conversation(key):
+    if not valid_destination(key): abort(404)
+    if request.method == "POST":
+        require_csrf(); body = request.form.get("body", "")
+        if not body.strip() or len(body) > 4000: flash("Enter a message of 1–4,000 characters.", "error")
+        else:
+            message_id = secrets.token_hex(16); messaging_request(f"outbound-{message_id}.json", {"id": message_id, "destination": key, "body": body})
+            flash("Reply queued. It may remain queued until Reticulum has a route.", "success")
+            return redirect(url_for("messaging_conversation", key=key))
+    rows = messaging_rows("SELECT * FROM messages WHERE conversation_key=? ORDER BY received_at", (key,))
+    if rows:
+        # Read state is operator UI data; the messaging service remains the
+        # sole writer to the message database, so mark-read is a request too.
+        messaging_request(f"read-{key}.json", {"conversation_key": key})
+    contact = messaging_rows("SELECT * FROM contacts WHERE destination=?", (key,))
+    return render_template("messaging_conversation.html", title="Conversation", key=key, rows=rows, contact=contact[0] if contact else None)
+
+@app.route("/messaging/contacts", methods=["GET", "POST"])
+@login_required
+def messaging_contacts():
+    if request.method == "POST":
+        require_csrf(); action = request.form.get("action"); destination = request.form.get("destination", "").strip().lower()
+        if action == "delete": messaging_request(f"contact-delete-{secrets.token_hex(8)}.json", {"destination": destination}); flash("Contact removal requested.", "success")
+        elif not valid_destination(destination): flash("Destination hash must be 32 or 64 hexadecimal characters.", "error")
+        elif not request.form.get("name", "").strip(): flash("Contact name is required.", "error")
+        else:
+            messaging_request(f"contact-save-{secrets.token_hex(8)}.json", {"destination": destination, "name": request.form["name"].strip()[:100], "notes": request.form.get("notes", "").strip()[:500]}); flash("Contact save requested.", "success")
+        return redirect(url_for("messaging_contacts"))
+    return render_template("messaging_contacts.html", title="Contacts", rows=messaging_rows("SELECT * FROM contacts ORDER BY name COLLATE NOCASE"))
+
+@app.route("/messaging/identity", methods=["GET", "POST"])
+@login_required
+def messaging_identity():
+    if request.method == "POST":
+        require_csrf(); action = request.form.get("action")
+        if action == "announce": messaging_request("announce-request", {"requested_at": now()}); flash("Manual announce requested.", "success")
+        else:
+            interval = request.form.get("interval_minutes", "60")
+            try: interval = int(interval)
+            except ValueError: interval = 0
+            if interval < 15: flash("Periodic announce interval must be at least 15 minutes.", "error")
+            else:
+                settings = {"enabled": bool(request.form.get("enabled")), "display_name": request.form.get("display_name", "").strip()[:80] or MESSAGING_DEFAULTS["display_name"], "announce_on_startup": bool(request.form.get("announce_on_startup")), "periodic_announce": bool(request.form.get("periodic_announce")), "interval_minutes": interval}
+                messaging_request("settings.json", settings); flash("Messaging identity settings saved.", "success")
+        return redirect(url_for("messaging_identity"))
+    return render_template("messaging_identity.html", title="My Identity", settings=messaging_settings(), status=messaging_status())
 
 @app.get("/announces")
 @login_required
