@@ -36,6 +36,10 @@ class WebConfigurationPreviewTests(unittest.TestCase):
         self.assertTrue(preview["ok"])
         self.assertEqual(preview["diff"], [{"section": "reticulum", "key": "enable_transport", "old": "No", "new": "Yes"}])
 
+    def test_loglevel_preview_uses_logging_section(self):
+        preview = self.web_app.local_config_preview({"kind": "global", "setting": "loglevel", "value": "6"})
+        self.assertEqual(preview["diff"], [{"section": "logging", "key": "loglevel", "old": "4", "new": "6"}])
+
     def test_interface_preview_redacts_passphrase_without_agent_request(self):
         preview = self.web_app.local_config_preview({"kind": "interface", "name": "Public TCP", "changes": {"mode": "boundary", "passphrase": "new-secret"}})
         self.assertTrue(preview["local_review"])

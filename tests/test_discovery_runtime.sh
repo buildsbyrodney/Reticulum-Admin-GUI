@@ -89,6 +89,16 @@ docker exec "$rnsd_container" /usr/local/bin/check-rnsd-health
 docker exec "$rnsd_container" rnstatus --config /root/.reticulum --json --all | grep -q 'Shared Instance\['
 docker exec "$rnsd_container" grep -Eqi '^\s*discover_interfaces\s*=\s*Yes\b' /root/.reticulum/config
 
+# The actual management image must place the Reticulum log level in [logging],
+# not the similarly named but ineffective legacy key in [reticulum]. This also
+# verifies the restart-and-observer health path for this global config change.
+response=$(curl -fsS -X POST -H 'Content-Type: application/json' -H 'X-Management-Token: discovery-test-token' \
+  --data '{"admin":"ci","reason":"Logging regression","operation_id":"CFG-20261012-000001-ABCDEF","change":{"kind":"global","setting":"loglevel","value":"6"}}' \
+  "http://127.0.0.1:${port}/config/apply")
+printf '%s' "$response" | python -c 'import json,sys; value=json.load(sys.stdin); assert value.get("ok") is True, value; assert not value.get("rolled_back"), value'
+docker exec "$rnsd_container" /usr/local/bin/check-rnsd-health
+docker exec "$rnsd_container" python -c 'from pathlib import Path; import re; text=Path("/root/.reticulum/config").read_text(); logging=re.search(r"(?ms)^\s*\[logging\]\s*$.*?(?=^\s*\[|\Z)", text); reticulum=re.search(r"(?ms)^\s*\[reticulum\]\s*$.*?(?=^\s*\[|\Z)", text); assert logging and re.search(r"^\s*loglevel\s*=\s*6\s*$", logging.group(), re.M), text; assert not re.search(r"^\s*loglevel\s*=", reticulum.group() if reticulum else "", re.M), text'
+
 # Deliberately remove LXMF from a derivative of the actual image. A
 # Discovery-enabled service must remain running-but-unhealthy with an explicit
 # error, rather than making Docker repeatedly recreate the container.

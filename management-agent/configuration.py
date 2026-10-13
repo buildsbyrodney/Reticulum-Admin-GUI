@@ -77,6 +77,10 @@ def public_model(text=None):
     text = read_config() if text is None else text
     sections = parse(text)
     global_settings = sections.get("reticulum", {}).get("settings", {})
+    # Reticulum reads this setting from [logging], not [reticulum].  Older
+    # Admin releases wrote it to the wrong section, so never use that legacy
+    # value as a display fallback.
+    logging_settings = sections.get("logging", {}).get("settings", {})
     interfaces = []
     for section in sections.values():
         if section.get("kind") != "interface": continue
@@ -90,7 +94,7 @@ def public_model(text=None):
             if key in values: item["fields"][key] = values[key]
         interfaces.append(item)
     version = os.environ.get("RNS_VERSION", "1.5.7")
-    global_model = {"enable_transport": global_settings.get("enable_transport", "No"), "loglevel": global_settings.get("loglevel")}
+    global_model = {"enable_transport": global_settings.get("enable_transport", "No"), "loglevel": logging_settings.get("loglevel")}
     for key in DISCOVERY_GLOBAL_FIELDS:
         global_model[key] = global_settings.get(key)
     # The path to a network identity is intentionally not exposed through the
@@ -304,16 +308,8 @@ def replacement_value(key, value):
     if key in ("enabled", "enable_transport", "discover_interfaces", "autoconnect_unverified_implementations", "bootstrap_only", "discoverable", "publish_ifac", "discovery_encrypt"): return "Yes" if value else "No"
     return str(value)
 
-def edit_text(text, change):
-    validate_change(change, text)
-    if change["kind"] == "interface_create": return create_interface_text(text, change["interface"])
-    if change["kind"] == "interface_delete": return delete_interface_text(text, change["name"])
-    if change["kind"] == "discovery_policy":
-        staged = edit_text(text, {"kind": "global_batch", "changes": change.get("global_changes") or {}})
-        return edit_text(staged, {"kind": "interface", "name": change.get("interface"), "changes": change.get("interface_changes") or {}})
-    if change["kind"] == "global": target, changes = "reticulum", {change["setting"]: change["value"]}
-    elif change["kind"] == "global_batch": target, changes = "reticulum", change["changes"]
-    else: target, changes = change["name"], change["changes"]
+def _replace_section_settings(text, target, changes, *, create=False, remove=()):
+    """Change a known section without reformatting unrelated config text."""
     lines, section_start, section_end, current = text.splitlines(keepends=True), {}, {}, None
     for index, line in enumerate(lines):
         match = re.match(r"^\s*(\[\[.*?\]\]|\[.*?\])\s*$", line)
@@ -321,15 +317,54 @@ def edit_text(text, change):
             if current is not None: section_end[current] = index
             label = match.group(1); current = label[2:-2].strip() if label.startswith("[[") else label[1:-1].strip(); section_start[current] = index
     if current is not None: section_end[current] = len(lines)
-    if target not in section_start: raise ValueError("Configuration section is missing")
+    if target not in section_start:
+        if not create: raise ValueError("Configuration section is missing")
+        text = text.rstrip("\n") + f"\n\n[{target}]\n"
+        lines = text.splitlines(keepends=True)
+        section_start, section_end = {target: len(lines) - 1}, {target: len(lines)}
     seen = set(); start, end = section_start[target] + 1, section_end[target]
+    output = []
     for index in range(start, end):
-        match = re.match(r"^(\s*)([A-Za-z][A-Za-z0-9_]*)(\s*=\s*)(.*?)(\s*(?:#.*)?)(\r?\n?)$", lines[index])
-        if match and match.group(2).lower() in changes:
-            key = match.group(2).lower(); lines[index] = f"{match.group(1)}{match.group(2)}{match.group(3)}{replacement_value(key, changes[key])}{match.group(5)}{match.group(6)}"; seen.add(key)
+        line = lines[index]
+        match = re.match(r"^(\s*)([A-Za-z][A-Za-z0-9_]*)(\s*=\s*)(.*?)(\s*(?:#.*)?)(\r?\n?)$", line)
+        if match:
+            key = match.group(2).lower()
+            if key in remove:
+                continue
+            if key in changes:
+                line = f"{match.group(1)}{match.group(2)}{match.group(3)}{replacement_value(key, changes[key])}{match.group(5)}{match.group(6)}"
+                seen.add(key)
+        output.append(line)
     insert = [f"{key} = {replacement_value(key, value)}\n" for key, value in changes.items() if key not in seen]
-    lines[end:end] = insert
+    lines[start:end] = output + insert
     return "".join(lines)
+
+def edit_text(text, change):
+    validate_change(change, text)
+    if change["kind"] == "interface_create": return create_interface_text(text, change["interface"])
+    if change["kind"] == "interface_delete": return delete_interface_text(text, change["name"])
+    if change["kind"] == "discovery_policy":
+        staged = edit_text(text, {"kind": "global_batch", "changes": change.get("global_changes") or {}})
+        return edit_text(staged, {"kind": "interface", "name": change.get("interface"), "changes": change.get("interface_changes") or {}})
+    if change["kind"] == "global":
+        changes = {change["setting"]: change["value"]}
+        # `loglevel` historically landed in [reticulum]. Write only the
+        # section Reticulum actually reads and clean that known stale key.
+        level = changes.pop("loglevel", None)
+        if changes: text = _replace_section_settings(text, "reticulum", changes)
+        if level is not None:
+            text = _replace_section_settings(text, "logging", {"loglevel": level}, create=True)
+            text = _replace_section_settings(text, "reticulum", {}, remove={"loglevel"})
+        return text
+    if change["kind"] == "global_batch":
+        changes = dict(change["changes"])
+        level = changes.pop("loglevel", None)
+        if changes: text = _replace_section_settings(text, "reticulum", changes)
+        if level is not None:
+            text = _replace_section_settings(text, "logging", {"loglevel": level}, create=True)
+            text = _replace_section_settings(text, "reticulum", {}, remove={"loglevel"})
+        return text
+    return _replace_section_settings(text, change["name"], change["changes"])
 
 def redacted_diff(before, after):
     a, b = parse(before), parse(after); result=[]

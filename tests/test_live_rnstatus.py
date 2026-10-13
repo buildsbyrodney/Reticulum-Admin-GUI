@@ -204,7 +204,17 @@ class LiveRnstatusTests(unittest.TestCase):
         self.assertIn("fields.querySelectorAll('input').forEach(e => e.disabled = !ifac.checked)", tcp_client)
         self.assertIn("Using Tailscale", tcp_client + help_page)
         self.assertIn("must match that server’s Listen Port", tcp_client)
+        self.assertIn("IFAC network name, passphrase, and IFAC size must match the remote server exactly", tcp_client)
+        self.assertIn("Give connecting users the network name, passphrase, and IFAC size configured here. All three values must match.", tcp_server)
+        self.assertIn("there is no universal default", tcp_client)
         self.assertNotIn("Cloudflare", tcp_client + tcp_server + help_page)
+
+    def test_discovery_announce_status_does_not_fabricate_a_timestamp(self):
+        client = self.client()
+        page = client.get("/discovery").get_data(as_text=True)
+        self.assertIn("Last discovery announce:", page)
+        self.assertIn("Not exposed by this Reticulum runtime", page)
+        self.assertIn("newly listening peer may need to wait until the next announcement", page)
 
     def test_ifac_must_be_enabled_and_is_not_inherited(self):
         base = {"purpose": "tcp_client", "interface_type": "TCPClientInterface", "name": "Upstream", "enabled": "on", "mode": "full", "target_host": "server.example", "target_port": "4242"}

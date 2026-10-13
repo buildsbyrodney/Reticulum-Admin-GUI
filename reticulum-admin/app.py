@@ -494,6 +494,26 @@ def discovered_interface_models(snap, observed=None, config=None):
         })
     return records
 
+def discovery_announcement_status(snap):
+    """Use only an explicitly reported observer value for announce timing.
+
+    Reticulum 1.5.7's supported `rnstatus --json` output normally reports
+    discovered *remote* interfaces but not when this node last advertised one.
+    The observer intentionally does not scrape log output or import Reticulum
+    into another process just to guess that time.  Keep a narrow forward
+    compatible hook if a later runtime explicitly publishes it.
+    """
+    status = snap.get("status") if isinstance(snap, dict) else None
+    records = status.get("interfaces", []) if isinstance(status, dict) else []
+    for record in records if isinstance(records, list) else []:
+        if not isinstance(record, dict):
+            continue
+        value = record.get("last_discovery_announce")
+        if value is not None:
+            return {"available": True, "last": value}
+    return {"available": False,
+            "reason": "Reticulum 1.5.7 does not expose a local discovery-announcement timestamp through rnstatus."}
+
 def discovery_form_change(form, config):
     """Translate the narrow Discovery form into only supported config keys."""
     def text_value(name):
@@ -630,12 +650,12 @@ def local_config_preview(change):
     if change.get("kind") == "global":
         setting = change.get("setting")
         old = (config.get("global") or {}).get(setting)
-        diff.append({"section": "reticulum", "key": setting, "old": display_config_value(old), "new": display_config_value(change.get("value"))})
+        diff.append({"section": "logging" if setting == "loglevel" else "reticulum", "key": setting, "old": display_config_value(old), "new": display_config_value(change.get("value"))})
         return {"ok": True, "diff": diff, "local_review": True}
     if change.get("kind") == "global_batch":
         for setting, value in (change.get("changes") or {}).items():
             old = (config.get("global") or {}).get(setting)
-            diff.append({"section": "reticulum", "key": setting, "old": display_config_value(old), "new": display_config_value(value)})
+            diff.append({"section": "logging" if setting == "loglevel" else "reticulum", "key": setting, "old": display_config_value(old), "new": display_config_value(value)})
         return {"ok": True, "diff": diff, "local_review": True}
     if change.get("kind") == "discovery_policy":
         global_preview = local_config_preview({"kind": "global_batch", "changes": change.get("global_changes") or {}})
@@ -821,7 +841,8 @@ def discovery():
     snap, observed, _ = ingest_snapshot()
     return render_template("discovery.html", title="Discovery", config=config, capabilities=discovery_capabilities(config),
                            discovered=discovered_interface_models(snap, observed, config), discovery_error=snap.get("discovery_error"),
-                           configured=config.get("interfaces", []), sources=discovery_sources(config), labels=labels())
+                           configured=config.get("interfaces", []), sources=discovery_sources(config), labels=labels(),
+                           announce_status=discovery_announcement_status(snap))
 
 @app.get("/help")
 @login_required

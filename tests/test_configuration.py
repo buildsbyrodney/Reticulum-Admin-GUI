@@ -37,6 +37,40 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError): cfg.edit_text(SAMPLE,{"kind":"interface","name":"Public TCP","changes":{"listen_port":70000}})
         candidate=cfg.edit_text(SAMPLE,{"kind":"global","setting":"enable_transport","value":True}); cfg.atomic_write(candidate)
         self.assertIn("enable_transport = Yes",cfg.read_config()); self.assertTrue((cfg.ROOT/"config.original").exists())
+
+    def test_loglevel_is_read_and_written_only_in_logging_section(self):
+        text = """[reticulum]\nenable_transport = No\ncustom_global = retain\n\n[logging]\nloglevel = 4\nlogtimestamps = Yes\n"""
+        self.assertEqual(cfg.public_model(text)["global"]["loglevel"], "4")
+        candidate = cfg.edit_text(text, {"kind":"global", "setting":"loglevel", "value":"6"})
+        parsed = cfg.parse(candidate)
+        self.assertEqual(parsed["logging"]["settings"]["loglevel"], "6")
+        self.assertEqual(parsed["logging"]["settings"]["logtimestamps"], "Yes")
+        self.assertNotIn("loglevel", parsed["reticulum"]["settings"])
+        self.assertIn("custom_global = retain", candidate)
+
+    def test_loglevel_creates_logging_and_removes_only_legacy_reticulum_value(self):
+        legacy = """# keep\n[reticulum]\nenable_transport = No\nloglevel = 4\ncustom_global = retain\n"""
+        candidate = cfg.edit_text(legacy, {"kind":"global", "setting":"loglevel", "value":"6"})
+        parsed = cfg.parse(candidate)
+        self.assertEqual(parsed["logging"]["settings"]["loglevel"], "6")
+        self.assertNotIn("loglevel", parsed["reticulum"]["settings"])
+        self.assertEqual(parsed["reticulum"]["settings"]["enable_transport"], "No")
+        self.assertEqual(parsed["reticulum"]["settings"]["custom_global"], "retain")
+
+    def test_loglevel_apply_restarts_and_verifies_health(self):
+        old_runtime, old_health = cfg.apply_runtime, cfg.health
+        def healthy(wait_for_restart=False, *args):
+            return (True, "observer healthy", {"restart_verified": True}) if wait_for_restart else (True, "observer healthy")
+        try:
+            cfg.apply_runtime = lambda change, operation_id=None: (True, "rnsd_restart", "restart requested", 5)
+            cfg.health = healthy
+            result = cfg.apply_change("admin", "Change log level", {"kind":"global", "setting":"loglevel", "value":"6"}, "CFG-20261012-060000-ABC123")
+        finally:
+            cfg.apply_runtime, cfg.health = old_runtime, old_health
+        self.assertTrue(result["ok"])
+        parsed = cfg.parse(cfg.read_config())
+        self.assertEqual(parsed["logging"]["settings"]["loglevel"], "6")
+        self.assertNotIn("loglevel", parsed["reticulum"]["settings"])
     def test_snapshot_restore_creates_safety_snapshot(self):
         first=cfg.create_snapshot("admin","before",{"manual":True},False)
         cfg.atomic_write(cfg.edit_text(SAMPLE,{"kind":"global","setting":"enable_transport","value":True}))
