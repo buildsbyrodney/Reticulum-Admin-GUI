@@ -10,6 +10,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify generated KJV library against canonical source
+        run: node scripts/generate-kjv-library.mjs --check
       - run: python -m pip install -r reticulum-admin/requirements.txt
       - run: python -m unittest discover -s tests
       - run: python -c "from pathlib import Path; [compile(p.read_text(), str(p), 'exec') for p in Path('.').glob('**/*.py') if '.git' not in p.parts]"

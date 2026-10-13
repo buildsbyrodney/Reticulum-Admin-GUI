@@ -35,8 +35,44 @@ class EchoBotTests(unittest.TestCase):
         self.assertIn(processor.reply("COFFEE"), bot.COFFEE)
         self.assertIn(processor.reply("RADIO"), bot.RADIO)
         self.assertIn("John 3:16 KJV", processor.reply("verse john 3:16"))
-        self.assertIn("not in my local KJV", processor.reply("VERSE Genesis 1:1"))
+        self.assertIn("not in my local KJV", processor.reply("VERSE Genesis 99:99"))
         self.assertIn("KJV", processor.reply("VERSE"))
+
+    def test_expanded_libraries_and_generated_kjv_integrity(self):
+        from responses import JOKES, DAD_JOKES, EIGHT_BALL, FACTS, COFFEE, RADIO, KJV, KJV_TOPICS
+        self.assertGreaterEqual(len(bot.TEST), 40); self.assertGreaterEqual(len(JOKES), 25)
+        self.assertGreaterEqual(len(DAD_JOKES), 25); self.assertGreaterEqual(len(EIGHT_BALL), 18)
+        self.assertGreaterEqual(len(FACTS), 25); self.assertGreaterEqual(len(COFFEE), 20); self.assertGreaterEqual(len(RADIO), 20)
+        self.assertGreaterEqual(len(KJV), 100); self.assertEqual(len(KJV), len(set(KJV)))
+        self.assertTrue(all(text.strip() for _, text in KJV.values()))
+        self.assertIn("In the beginning God created the heaven and the earth.", KJV["genesis 1:1"][1])
+        self.assertIn("For God so loved the world", KJV["john 3:16"][1])
+        self.assertTrue(all(reference in KJV for group in KJV_TOPICS.values() for reference in group))
+        self.assertIn("Song of Solomon 2:1", (reference for reference, _ in KJV.values()))
+        self.assertIn("2 Timothy 1:7", (reference for reference, _ in KJV.values()))
+        self.assertIn("1 John 4:8", (reference for reference, _ in KJV.values()))
+        self.assertIn("Revelation 21:4", (reference for reference, _ in KJV.values()))
+
+    def test_aliases_topics_and_diagnostics(self):
+        processor = bot.CommandProcessor(lambda: {"transport":"On", "paths":42, "interfaces":3, "clients":1, "uptime":"2h 14m", "interface_summary":"Interfaces", "client_summary":"TCP clients: 1", "path_summary":"Known paths: 42"})
+        self.assertIn("Diagnostics", processor.reply("DIAGNOSTICS")); self.assertIn("Diagnostics", processor.reply("DIAG"))
+        self.assertEqual(processor.reply("INFO"), processor.reply("STATUS")); self.assertEqual(processor.reply("IFACES"), processor.reply("INTERFACES"))
+        self.assertEqual(processor.reply("CLIENT"), processor.reply("CLIENTS"))
+        self.assertEqual(processor.reply("ROUTES"), processor.reply("PATHS")); self.assertEqual(processor.reply("?"), processor.reply("HELP"))
+        expected_psalm = processor.reply("VERSE Psalm 23:1")
+        self.assertEqual(expected_psalm, processor.reply("VERSE Psalms 23:1"))
+        self.assertEqual(expected_psalm, processor.reply("VERSE Ps 23:1"))
+        self.assertIn("Psalm 23:1 KJV", expected_psalm); self.assertIn("Proverbs 3:5 KJV", processor.reply("VERSE Pr 3:5"))
+        self.assertIn("John 3:16 KJV", processor.reply("VERSE Jn 3:16")); self.assertIn("Romans 8:28 KJV", processor.reply("VERSE Rom 8:28"))
+        self.assertIn("1 Corinthians 13:4 KJV", processor.reply("VERSE 1 Cor 13:4"))
+        self.assertIn("1 Corinthians 13:4 KJV", processor.reply("VERSE I Corinthians 13:4"))
+        self.assertIn("KJV", processor.reply("VERSE faith"))
+
+    def test_random_responses_do_not_immediately_repeat(self):
+        processor = bot.CommandProcessor(lambda: {"transport":"Off", "paths":0, "interfaces":0, "clients":0, "uptime":"0m"})
+        for library in (bot.TEST, bot.JOKES, bot.DAD_JOKES, bot.EIGHT_BALL, bot.FACTS, bot.COFFEE, bot.RADIO):
+            first = processor.choose(library)
+            self.assertNotEqual(first, processor.choose(library))
 
     def test_replies_are_bounded_and_input_is_case_insensitive(self):
         processor = bot.CommandProcessor(lambda: {"transport":"Off", "paths":0, "interfaces":0, "clients":0, "uptime":"0m"})

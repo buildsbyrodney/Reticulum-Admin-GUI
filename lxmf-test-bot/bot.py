@@ -6,7 +6,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from responses import COFFEE, DAD_JOKES, EIGHT_BALL, FACTS, JOKES, KJV, RADIO, TEST
+from responses import COFFEE, DAD_JOKES, EIGHT_BALL, FACTS, JOKES, KJV, KJV_TOPICS, RADIO, TEST
 
 MIN_INTERVAL = 15
 STATE = Path(os.environ.get("BOT_STATE_DIR", "/bot"))
@@ -22,6 +22,7 @@ MENU = """Reticulum Admin Bot
 Diagnostics
 PING
 STATUS
+DIAGNOSTICS
 INTERFACES
 CLIENTS
 PATHS
@@ -69,11 +70,20 @@ class CommandProcessor:
         candidates = [value for value in options if value != self.last_choice.get(id(options))] or list(options)
         value = random.choice(candidates); self.last_choice[id(options)] = value
         return value
+    def normalise_reference(self, reference):
+        value = " ".join(reference.lower().replace(".", "").split())
+        aliases = {"ps ": "psalm ", "psalms ": "psalm ", "prov ": "proverbs ", "pr ": "proverbs ", "jn ": "john ", "rom ": "romans ", "phil ": "philippians ", "1 cor ": "1 corinthians ", "2 cor ": "2 corinthians ", "i corinthians ": "1 corinthians ", "ii corinthians ": "2 corinthians "}
+        for short, full in aliases.items():
+            if value.startswith(short): return full + value[len(short):]
+        return value
     def verse(self, reference):
         if not reference:
             reference, text = self.choose(tuple(KJV.values()))
         else:
-            item = KJV.get(" ".join(reference.lower().split()))
+            key = self.normalise_reference(reference)
+            if key in KJV_TOPICS:
+                key = self.choose(KJV_TOPICS[key])
+            item = KJV.get(key)
             if not item: return "That reference is not in my local KJV verse library yet."
             reference, text = item
         return f'“{text}”\n— {reference} KJV'
@@ -85,6 +95,14 @@ class CommandProcessor:
         if upper == "STATUS":
             value = self.status()
             return "Transport: {transport}\nInterfaces: {interfaces} up\nTCP clients: {clients}\nKnown paths: {paths}\nBot uptime: {uptime}".format(**value)
+        if upper in ("DIAGNOSTICS", "DIAG"):
+            value = {"reticulum": "Unavailable", "bot": "Ready", **self.status()}
+            return "Diagnostics\nReticulum: {reticulum}\nTransport: {transport}\nInterfaces up: {interfaces}\nTCP clients: {clients}\nKnown paths: {paths}\nBot: {bot}\nBot uptime: {uptime}".format(**value)
+        if upper == "INFO": return self.reply("STATUS")
+        if upper == "IFACES": return self.reply("INTERFACES")
+        if upper == "CLIENT": return self.reply("CLIENTS")
+        if upper == "ROUTES": return self.reply("PATHS")
+        if upper == "?": return self.reply("HELP")
         if upper == "INTERFACES": return self.status().get("interface_summary", "No runtime interface information is available.")
         if upper == "CLIENTS": return self.status().get("client_summary", "TCP clients: 0")
         if upper == "PATHS": return self.status().get("path_summary", f"Known paths: {self.status().get('paths', 0)}")
@@ -117,7 +135,7 @@ class EchoBot:
         # inbound TCP peers. Only a TCP server reports the latter directly.
         clients = sum((row.get("clients") or 0) for row in interfaces if row.get("type") == "TCPServerInterface")
         transport_active = bool(status.get("transport_id") or status.get("transport_instance") or status.get("transport_enabled"))
-        return {"transport": "On" if transport_active else "Off", "paths": len(snapshot.get("paths") or []), "interfaces": len(active), "clients": clients, "uptime": self.uptime(), "interface_summary": "Interfaces\n" + ("\n".join(names) if names else "No active interfaces reported."), "client_summary": f"TCP clients: {clients}", "path_summary": f"Known paths: {len(snapshot.get('paths') or [])}"}
+        return {"reticulum": "Ready" if status else "Unavailable", "bot": "Ready", "transport": "On" if transport_active else "Off", "paths": len(snapshot.get("paths") or []), "interfaces": len(active), "clients": clients, "uptime": self.uptime(), "interface_summary": "Interfaces\n" + ("\n".join(names) if names else "No active interfaces reported."), "client_summary": f"TCP clients: {clients}", "path_summary": f"Known paths: {len(snapshot.get('paths') or [])}"}
     def uptime(self):
         seconds = int(time.time()) - self.started_at
         hours, minutes = divmod(seconds // 60, 60)
