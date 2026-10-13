@@ -91,6 +91,14 @@ class LiveRnstatusTests(unittest.TestCase):
         self.assertIn("Default Interface", page)
         self.assertEqual(page.count("AutoInterface[Default Interface]"), 0)
 
+    def test_bot_is_a_top_level_navigation_item_not_a_diagnostics_child(self):
+        page = self.client().get("/diagnostics/bot").get_data(as_text=True)
+        navigation = page.split("<nav>", 1)[1].split("</nav>", 1)[0]
+        self.assertIn('<a href="/diagnostics">Diagnostics</a>', navigation)
+        self.assertIn('<a href="/diagnostics/bot">Bot</a>', navigation)
+        self.assertEqual(navigation.count('href="/diagnostics/bot"'), 1)
+        self.assertNotIn("Test Echo Bot", navigation)
+
     def test_configured_interface_is_merged_and_system_interfaces_are_read_only(self):
         client = self.client()
         page = client.get("/interfaces").get_data(as_text=True)

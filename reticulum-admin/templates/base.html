@@ -10,7 +10,7 @@
   <header>
     <a class="brand" href="{{ url_for('dashboard') }}">Reticulum Admin</a>
     {% if session.admin %}
-    <nav>{% for key,label in [('interfaces','Interfaces'),('topology','Topology'),('discovery','Discovery'),('clients','Connected Clients'),('timeline','Timeline'),('paths','Paths'),('diagnostics','Diagnostics'),('announces','Announces'),('queues','Queues'),('blackholes','Blackholes'),('recovery','Incident Recovery'),('incident_history','Incident History'),('logs','Logs'),('configuration','Configuration'),('snapshots','Snapshots'),('system','System'),('help_concepts','Help / Concepts')] %}<a href="{{ url_for(key) }}">{{ label }}</a>{% endfor %}</nav>
+    <nav>{% for key,label in [('interfaces','Interfaces'),('topology','Topology'),('discovery','Discovery'),('clients','Connected Clients'),('timeline','Timeline'),('paths','Paths'),('diagnostics','Diagnostics'),('test_echo_bot','Bot'),('announces','Announces'),('queues','Queues'),('blackholes','Blackholes'),('recovery','Incident Recovery'),('incident_history','Incident History'),('logs','Logs'),('configuration','Configuration'),('snapshots','Snapshots'),('system','System'),('help_concepts','Help / Concepts')] %}<a href="{{ url_for(key) }}">{{ label }}</a>{% endfor %}</nav>
     <form action="{{ url_for('logout') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button>Sign out</button></form>
     {% endif %}
   </header>

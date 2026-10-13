@@ -41,7 +41,7 @@ The **Diagnostics** page separates network-facing configuration checks from Reti
 
 `lxmf-test-bot` is a separate, non-administrative service with its own persistent LXMF identity. It uses Linux host networking solely to attach to the same local Reticulum shared-instance socket as `rnsd`; it publishes no ports and never has the management token, Docker socket, admin database, or configuration-write access. Its identity and LXMF destination persist under `data/bot/`.
 
-Open **Diagnostics → Test Echo Bot**, copy or announce its LXMF destination, then message it from MeshChat:
+Open **Bot**, copy or announce its LXMF destination, then message it from MeshChat:
 
 ```text
 PING          → PONG
