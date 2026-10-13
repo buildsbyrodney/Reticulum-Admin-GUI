@@ -7,6 +7,8 @@ REQUESTS = Path(os.environ.get("MESSAGING_REQUEST_DIR", "/requests"))
 RETICULUM_READY = Path("/reticulum/admin-status/rnsd.ready")
 DEFAULTS = {"enabled": True, "display_name": "Reticulum Admin User", "announce_on_startup": True, "periodic_announce": False, "interval_minutes": 60}
 MIN_INTERVAL, MAX_BODY = 15, 4000
+PATH_LOOKUP_SECONDS = max(1, min(30, int(os.environ.get("MESSAGING_PATH_LOOKUP_SECONDS", "10"))))
+DESTINATION_RE = re.compile(r"[0-9a-fA-F]{32}")
 
 def atomic_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True); tmp = path.with_suffix(path.suffix + ".tmp")
@@ -49,19 +51,30 @@ class Messaging:
         self.state["last_message_received"] = stamp; self.state["last_error"] = None
     def send(self, item):
         message_id, target, body = item.get("id"), item.get("destination", ""), item.get("body", "")[:MAX_BODY]
-        if not message_id or not re.fullmatch(r"[0-9a-fA-F]{32}(?:[0-9a-fA-F]{32})?", target) or not body.strip(): return
+        if not message_id or not DESTINATION_RE.fullmatch(target) or not body.strip(): return
         stamp = int(time.time())
-        with connect() as con: con.execute("UPDATE messages SET delivery_state='Queued',updated_at=? WHERE id=?", (stamp, message_id))
+        # Requests are intentionally idempotent: a crash after consuming a
+        # file cannot create a second stored message or send attempt.
+        with connect() as con:
+            created = con.execute("INSERT OR IGNORE INTO messages(id,conversation_key,direction,sender_destination,recipient_destination,body,received_at,delivery_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (message_id, target.lower(), "outbound", self.destination.hash.hex() if self.destination else None, target.lower(), body, stamp, "Pending", stamp, stamp)).rowcount
+            if not created: return
+            con.execute("UPDATE messages SET delivery_state='Queued',updated_at=? WHERE id=?", (stamp, message_id))
         try:
             import RNS, LXMF
-            identity = RNS.Identity.recall(bytes.fromhex(target))
-            if identity is None: raise RuntimeError("unknown destination")
+            destination_hash = bytes.fromhex(target)
+            identity = RNS.Identity.recall(destination_hash)
+            if identity is None:
+                RNS.Transport.request_path(destination_hash)
+                deadline = time.monotonic() + PATH_LOOKUP_SECONDS
+                while identity is None and time.monotonic() < deadline:
+                    time.sleep(0.25); identity = RNS.Identity.recall(destination_hash)
+            if identity is None: raise RuntimeError("route unavailable")
             destination = RNS.Destination(identity, RNS.Destination.OUT, RNS.Destination.SINGLE, "lxmf", "delivery")
             self.router.handle_outbound(LXMF.LXMessage(destination, self.destination, body, desired_method=LXMF.LXMessage.DIRECT))
             with connect() as con: con.execute("UPDATE messages SET delivery_state='Sent',updated_at=? WHERE id=?", (stamp, message_id))
             self.state["last_message_sent"] = stamp; self.state["last_error"] = None
         except Exception:
-            with connect() as con: con.execute("UPDATE messages SET delivery_state='Failed',error='Message could not be sent with currently known Reticulum routing.',updated_at=? WHERE id=?", (stamp, message_id))
+            with connect() as con: con.execute("UPDATE messages SET delivery_state='Failed',error='No usable Reticulum route was available before the lookup timeout.',updated_at=? WHERE id=?", (stamp, message_id))
             self.state["last_error"] = "Last outbound message could not be sent"
     def process_requests(self):
         REQUESTS.mkdir(parents=True, exist_ok=True)
@@ -79,7 +92,7 @@ class Messaging:
             destination = item.get("destination", "")
             with connect() as con:
                 if request.name.startswith("contact-delete-"): con.execute("DELETE FROM contacts WHERE destination=?", (destination,))
-                elif re.fullmatch(r"[0-9a-fA-F]{32}(?:[0-9a-fA-F]{32})?", destination) and item.get("name"):
+                elif DESTINATION_RE.fullmatch(destination) and item.get("name"):
                     stamp = int(time.time()); con.execute("INSERT INTO contacts(name,destination,notes,created_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(destination) DO UPDATE SET name=excluded.name,notes=excluded.notes,updated_at=excluded.updated_at", (item["name"][:100], destination.lower(), item.get("notes", "")[:500], stamp, stamp))
         announce = REQUESTS / "announce-request"
         if announce.exists(): announce.unlink(missing_ok=True); self.announce()

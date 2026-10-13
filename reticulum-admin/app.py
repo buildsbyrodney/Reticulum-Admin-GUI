@@ -109,7 +109,7 @@ def messaging_rows(query, values=()):
 def messaging_unread_count():
     rows = messaging_rows("SELECT count(*) AS count FROM messages WHERE direction='inbound' AND read_at IS NULL")
     return rows[0]["count"] if rows else 0
-def valid_destination(value): return bool(re.fullmatch(r"[0-9a-fA-F]{32}(?:[0-9a-fA-F]{32})?", value or ""))
+def valid_destination(value): return bool(re.fullmatch(r"[0-9a-fA-F]{32}", value or ""))
 def messaging_request(name, value): atomic_json(MESSAGING_REQUEST_DIR / name, value)
 
 def csrf_token():
@@ -1123,7 +1123,7 @@ def messaging():
 def messaging_new():
     if request.method == "POST":
         require_csrf(); destination = (request.form.get("destination", "") or request.form.get("destination_value", "")).strip().lower(); body = request.form.get("body", "")
-        if not valid_destination(destination): flash("Destination hash must be 32 or 64 hexadecimal characters.", "error")
+        if not valid_destination(destination): flash("Destination hash must be exactly 32 hexadecimal characters.", "error")
         elif not body.strip(): flash("Message body cannot be empty.", "error")
         elif len(body) > 4000: flash("Message body must be 4,000 characters or fewer.", "error")
         else:
@@ -1161,7 +1161,7 @@ def messaging_contacts():
     if request.method == "POST":
         require_csrf(); action = request.form.get("action"); destination = request.form.get("destination", "").strip().lower()
         if action == "delete": messaging_request(f"contact-delete-{secrets.token_hex(8)}.json", {"destination": destination}); flash("Contact removal requested.", "success")
-        elif not valid_destination(destination): flash("Destination hash must be 32 or 64 hexadecimal characters.", "error")
+        elif not valid_destination(destination): flash("Destination hash must be exactly 32 hexadecimal characters.", "error")
         elif not request.form.get("name", "").strip(): flash("Contact name is required.", "error")
         else:
             messaging_request(f"contact-save-{secrets.token_hex(8)}.json", {"destination": destination, "name": request.form["name"].strip()[:100], "notes": request.form.get("notes", "").strip()[:500]}); flash("Contact save requested.", "success")

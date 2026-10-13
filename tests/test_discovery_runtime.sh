@@ -92,7 +92,7 @@ docker exec "$rnsd_container" rnstatus --config /root/.reticulum | grep -Eq 'Ser
 # The operator Messaging endpoint is a separate shared-instance client. Its
 # identity is persistent and must not collapse into the bot destination.
 docker run -d --name "$messaging_container" --network host \
-  -e MESSAGING_STATE_DIR=/messaging -e MESSAGING_REQUEST_DIR=/requests \
+  -e MESSAGING_STATE_DIR=/messaging -e MESSAGING_REQUEST_DIR=/requests -e MESSAGING_PATH_LOOKUP_SECONDS=1 \
   -v "$state:/reticulum:ro" -v "$messaging_state:/messaging" -v "$messaging_requests:/requests" "$messaging_image" >/dev/null
 if ! wait_for 35 sh -c "test -s '$messaging_state/status.json' && grep -q '\"running\": true' '$messaging_state/status.json'"; then
   docker logs "$messaging_container" >&2 || true
@@ -109,6 +109,12 @@ if ! wait_for 35 sh -c "test -s '$messaging_state/status.json' && grep -q '\"run
 fi
 messaging_destination_after=$(python3 -c "import json; print(json.load(open('$messaging_state/status.json'))['destination'])")
 test "$messaging_destination_before" = "$messaging_destination_after"
+printf '%s' '{"id":"outbound-test","destination":"0123456789abcdef0123456789abcdef","body":"actual image outbound persistence"}' > "$messaging_requests/outbound-outbound-test.json"
+if ! wait_for 10 python3 -c "import sqlite3; row=sqlite3.connect('$messaging_state/messages.db').execute(\"select body,conversation_key,delivery_state from messages where id='outbound-test'\").fetchone(); assert row and row[0] == 'actual image outbound persistence' and row[1] == '0123456789abcdef0123456789abcdef' and row[2] in ('Sent','Failed')"; then
+  docker logs "$messaging_container" >&2 || true
+  echo "Messaging service did not persist queued outbound message" >&2
+  exit 1
+fi
 docker exec "$rnsd_container" rnstatus --config /root/.reticulum | grep -Eq 'Serving[[:space:]]*:[[:space:]]*2 programs'
 
 # Actual management image applies the same config path the GUI uses. The rnsd
