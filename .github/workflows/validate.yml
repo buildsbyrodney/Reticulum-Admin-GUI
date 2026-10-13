@@ -41,3 +41,5 @@ jobs:
           fi
           tar -tvzf release/*.tar.gz | awk '$NF ~ /\/install\.sh$/ { found=1; if (substr($1, 4, 1) != "x") exit 1 } END { exit found ? 0 : 1 }'
           tar -tzf release/*.tar.gz | grep -Eq '/lxmf-messaging/messaging\.py$'
+          tar -tzf release/*.tar.gz | grep -Eq '/reticulum-admin/templates/messaging\.html$'
+          tar -tzf release/*.tar.gz | grep -Eq '/reticulum-admin/static/app\.css$'
