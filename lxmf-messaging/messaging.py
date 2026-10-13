@@ -29,11 +29,13 @@ def connect():
     con.executescript("""
       CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, conversation_key TEXT NOT NULL, direction TEXT NOT NULL, sender_destination TEXT, recipient_destination TEXT, sender_name TEXT, body TEXT NOT NULL, received_at INTEGER NOT NULL, read_at INTEGER, delivery_state TEXT NOT NULL, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS contacts (id INTEGER PRIMARY KEY, name TEXT NOT NULL, destination TEXT NOT NULL UNIQUE, notes TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS announced_peers (destination_hash TEXT PRIMARY KEY, identity_hash TEXT, display_name TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, last_hops INTEGER, announce_count INTEGER NOT NULL DEFAULT 1);
+      CREATE TABLE IF NOT EXISTS announced_peers (destination_hash TEXT PRIMARY KEY, identity_hash TEXT, display_name TEXT, message_display_name TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, last_hops INTEGER, announce_count INTEGER NOT NULL DEFAULT 1);
       CREATE INDEX IF NOT EXISTS messages_conversation_idx ON messages(conversation_key, received_at);
       CREATE INDEX IF NOT EXISTS announced_peers_last_seen_idx ON announced_peers(last_seen DESC);
       CREATE INDEX IF NOT EXISTS announced_peers_display_name_idx ON announced_peers(display_name);
     """)
+    try: con.execute("ALTER TABLE announced_peers ADD COLUMN message_display_name TEXT")
+    except sqlite3.OperationalError: pass
     return con
 
 class LXMFDeliveryAnnounceHandler:
@@ -50,10 +52,12 @@ class Messaging:
         # retries interrupted Pending/Queued rows once, since LXMF callbacks
         # do not survive a service restart.
         self.session_id = uuid.uuid4().hex; self.inflight_message_ids = set()
-        self.state = {"last_message_received": None, "last_message_sent": None, "last_error": None, "last_announce": None}
+        self.state = {"last_message_received": None, "last_message_sent": None, "last_error": None, "last_announce": None, "last_lxmf_delivery_announce": None, "lxmf_delivery_announces_observed": 0}
     def status(self, ready=False):
-        with connect() as con: pending = con.execute("SELECT count(*) FROM messages WHERE direction='outbound' AND delivery_state IN ('Pending','Queued')").fetchone()[0]
-        atomic_json(STATE / "status.json", {"running": ready, "process_running": True, "shared_instance_connected": ready, "lxmf_router_ready": bool(self.router), "announce_listener_registered": bool(self.announce_handler), "identity_loaded": bool(self.identity), "destination": self.destination.hash.hex() if self.destination else None, "identity": self.identity.hash.hex() if self.identity else None, "display_name": settings()["display_name"], "uptime_seconds": int(time.time())-self.started, "pending_outbound": pending, **self.state})
+        with connect() as con:
+            pending = con.execute("SELECT count(*) FROM messages WHERE direction='outbound' AND delivery_state IN ('Pending','Queued')").fetchone()[0]
+            stored_peers = con.execute("SELECT count(*) FROM announced_peers WHERE announce_count > 0").fetchone()[0]
+        atomic_json(STATE / "status.json", {"running": ready, "process_running": True, "shared_instance_connected": ready, "lxmf_router_ready": bool(self.router), "announce_listener_registered": bool(self.announce_handler), "identity_loaded": bool(self.identity), "destination": self.destination.hash.hex() if self.destination else None, "identity": self.identity.hash.hex() if self.identity else None, "display_name": settings()["display_name"], "uptime_seconds": int(time.time())-self.started, "pending_outbound": pending, "unique_lxmf_delivery_peers": stored_peers, **self.state})
     def announce(self):
         self.router.announce(self.destination.hash); self.state["last_announce"] = int(time.time()); self.state["last_error"] = None
     def receive(self, message):
@@ -62,7 +66,16 @@ class Messaging:
         body = (message.content_as_string() if hasattr(message, "content_as_string") else str(getattr(message, "content", "")))[:MAX_BODY]
         if not body: return
         sender = source_hash.hex() if hasattr(source_hash, "hex") else str(source_hash); stamp = int(time.time())
-        with connect() as con: con.execute("INSERT INTO messages(id,conversation_key,direction,sender_destination,recipient_destination,sender_name,body,received_at,delivery_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (uuid.uuid4().hex, sender, "inbound", sender, self.destination.hash.hex(), getattr(source, "display_name", None), body, stamp, "Received", stamp, stamp))
+        sender_name = getattr(source, "display_name", None)
+        if not isinstance(sender_name, str) or not sender_name.strip(): sender_name = None
+        elif len(sender_name.strip()) > 80: sender_name = sender_name.strip()[:80]
+        else: sender_name = sender_name.strip()
+        with connect() as con:
+            con.execute("INSERT INTO messages(id,conversation_key,direction,sender_destination,recipient_destination,sender_name,body,received_at,delivery_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (uuid.uuid4().hex, sender, "inbound", sender, self.destination.hash.hex(), sender_name, body, stamp, "Received", stamp, stamp))
+            # Message-provided names are informational only. They are retained
+            # separately so a later LXMF announce remains the preferred name.
+            if DESTINATION_RE.fullmatch(sender) and sender_name:
+                con.execute("INSERT INTO announced_peers(destination_hash,message_display_name,first_seen,last_seen,last_hops,announce_count) VALUES(?,?,?,?,?,0) ON CONFLICT(destination_hash) DO UPDATE SET message_display_name=excluded.message_display_name", (sender.lower(), sender_name, stamp, stamp, None))
         self.state["last_message_received"] = stamp; self.state["last_error"] = None
 
     def receive_announce(self, destination_hash, announced_identity=None, app_data=None):
@@ -71,6 +84,7 @@ class Messaging:
             import RNS, LXMF
             destination = destination_hash.hex() if hasattr(destination_hash, "hex") else str(destination_hash)
             if not DESTINATION_RE.fullmatch(destination): return
+            self.state["lxmf_delivery_announces_observed"] += 1
             identity = getattr(announced_identity, "hash", None)
             identity_hash = identity.hex().lower() if hasattr(identity, "hex") else None
             try: display_name = LXMF.display_name_from_app_data(app_data)
@@ -85,6 +99,7 @@ class Messaging:
             stamp = int(time.time())
             with connect() as con:
                 con.execute("INSERT INTO announced_peers(destination_hash,identity_hash,display_name,first_seen,last_seen,last_hops,announce_count) VALUES(?,?,?,?,?,?,1) ON CONFLICT(destination_hash) DO UPDATE SET identity_hash=COALESCE(excluded.identity_hash,announced_peers.identity_hash),display_name=COALESCE(excluded.display_name,announced_peers.display_name),last_seen=excluded.last_seen,last_hops=excluded.last_hops,announce_count=announced_peers.announce_count+1", (destination.lower(), identity_hash, display_name, stamp, stamp, hops))
+            self.state["last_lxmf_delivery_announce"] = stamp
         except Exception:
             # Announces are advisory public metadata. A malformed announce must
             # never interrupt messaging or expose private diagnostic details.

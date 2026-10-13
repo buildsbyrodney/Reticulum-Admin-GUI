@@ -14,7 +14,7 @@ from functools import wraps
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from flask import Flask, abort, flash, redirect, render_template, request, session, url_for
+from flask import Flask, abort, flash, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 from reticulum_adapter import find_interface_records, inbound_tcp_child_records
 
@@ -125,7 +125,7 @@ def messaging_conversations(search=""):
         ) AS conversation_rank
         FROM messages
       )
-      SELECT m.*, c.name AS contact_name, p.display_name AS announced_name,
+      SELECT m.*, c.name AS contact_name, COALESCE(p.display_name, p.message_display_name, m.sender_name) AS peer_name,
         (SELECT count(*) FROM messages unread WHERE unread.conversation_key=m.conversation_key AND unread.direction='inbound' AND unread.read_at IS NULL) AS unread_count
       FROM ranked_messages m
       LEFT JOIN contacts c ON c.destination=m.conversation_key
@@ -134,19 +134,27 @@ def messaging_conversations(search=""):
       ORDER BY m.received_at DESC LIMIT 100
     """, values)
 def messaging_announced_peers(search=""):
-    where, values = "", []
+    filters, values = ["p.announce_count > 0"], []
     if search:
         needle = f"%{search.lower()}%"
-        where = "WHERE lower(p.destination_hash) LIKE ? OR lower(COALESCE(p.display_name,'')) LIKE ? OR lower(COALESCE(c.name,'')) LIKE ?"
+        filters.append("(lower(p.destination_hash) LIKE ? OR lower(COALESCE(p.display_name,'')) LIKE ? OR lower(COALESCE(c.name,'')) LIKE ?)")
         values = [needle, needle, needle]
-    return messaging_rows(f"""SELECT p.*, c.name AS contact_name FROM announced_peers p LEFT JOIN contacts c ON c.destination=p.destination_hash {where} ORDER BY p.last_seen DESC LIMIT 250""", values)
+    return messaging_rows(f"""SELECT p.*, c.name AS contact_name FROM announced_peers p LEFT JOIN contacts c ON c.destination=p.destination_hash WHERE {' AND '.join(filters)} ORDER BY p.last_seen DESC LIMIT 250""", values)
 def messaging_peer(key):
-    rows = messaging_rows("SELECT p.*, c.name AS contact_name FROM announced_peers p LEFT JOIN contacts c ON c.destination=p.destination_hash WHERE p.destination_hash=?", (key,))
+    rows = messaging_rows("SELECT p.*, c.name AS contact_name, COALESCE(p.display_name,p.message_display_name) AS peer_name FROM announced_peers p LEFT JOIN contacts c ON c.destination=p.destination_hash WHERE p.destination_hash=?", (key,))
     return rows[0] if rows else None
+def messaging_conversation_rows(key):
+    return messaging_rows("SELECT * FROM (SELECT * FROM messages WHERE conversation_key=? ORDER BY received_at DESC,id DESC LIMIT 200) ORDER BY received_at,id", (key,))
+def messaging_message_json(row):
+    return {"id": row["id"], "direction": row["direction"], "body": row["body"], "timestamp": format_time(row["received_at"]), "delivery_state": row["delivery_state"], "error": row["error"] if row["delivery_state"] == "Failed" else None}
+def messaging_workspace_json(tab="conversations", search=""):
+    conversations = messaging_conversations(search) if tab == "conversations" else messaging_conversations()
+    peers = messaging_announced_peers(search) if tab == "announces" else messaging_announced_peers()
+    return {"tab": tab, "unread_total": messaging_unread_count(), "conversations": [{"destination": row["conversation_key"], "name": row["contact_name"] or row["peer_name"] or short_destination(row["conversation_key"]), "preview": ("You: " if row["direction"] == "outbound" else "") + row["body"][:90], "activity": format_time(row["received_at"]), "unread": row["unread_count"]} for row in conversations], "peers": [{"destination": row["destination_hash"], "name": row["contact_name"] or row["display_name"] or short_destination(row["destination_hash"]), "activity": format_time(row["last_seen"]), "hops": row["last_hops"]} for row in peers]}
 def messaging_workspace(tab="conversations", selected=None, search=""):
     conversations = messaging_conversations(search) if tab == "conversations" else messaging_conversations()
     peers = messaging_announced_peers(search) if tab == "announces" else messaging_announced_peers()
-    messages = messaging_rows("SELECT * FROM messages WHERE conversation_key=? ORDER BY received_at", (selected,)) if selected else []
+    messages = messaging_conversation_rows(selected) if selected else []
     contact_rows = messaging_rows("SELECT * FROM contacts WHERE destination=?", (selected,)) if selected else []
     peer = messaging_peer(selected) if selected else None
     return {"tab": tab, "search": search, "conversations": conversations, "peers": peers, "selected": selected, "rows": messages, "contact": contact_rows[0] if contact_rows else None, "peer": peer, "status": messaging_status(), "short_destination": short_destination}
@@ -161,7 +169,8 @@ def common_values():
     return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "messaging_unread": messaging_unread_count(), "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.7.1")}
 
 def require_csrf():
-    if not secrets.compare_digest(session.get("csrf", ""), request.form.get("csrf_token", "")): abort(400, "Invalid form token")
+    expected, supplied = session.get("csrf"), request.form.get("csrf_token")
+    if not expected or not supplied or not secrets.compare_digest(expected, supplied): abort(400, "Invalid form token")
 
 def is_configured():
     with db() as con: return con.execute("SELECT 1 FROM admins LIMIT 1").fetchone() is not None
@@ -1160,6 +1169,32 @@ def messaging():
     if tab not in ("conversations", "announces"): tab = "conversations"
     return render_template("messaging.html", title="Messaging", **messaging_workspace(tab=tab, search=request.args.get("q", "").strip()[:80]))
 
+@app.get("/messaging/api/workspace")
+@login_required
+def messaging_workspace_api():
+    tab = request.args.get("tab", "conversations")
+    if tab not in ("conversations", "announces"): tab = "conversations"
+    return jsonify(messaging_workspace_json(tab, request.args.get("q", "").strip()[:80]))
+
+@app.get("/messaging/api/conversations/<key>")
+@login_required
+def messaging_conversation_api(key):
+    if not valid_destination(key): abort(404)
+    peer = messaging_peer(key)
+    contacts = messaging_rows("SELECT name FROM contacts WHERE destination=?", (key,))
+    unread = messaging_rows("SELECT count(*) AS count FROM messages WHERE conversation_key=? AND direction='inbound' AND read_at IS NULL", (key,))
+    return jsonify({"destination": key, "messages": [messaging_message_json(row) for row in messaging_conversation_rows(key)], "unread_total": messaging_unread_count(), "unread_inbound": unread[0]["count"] if unread else 0, "peer_name": (contacts[0]["name"] if contacts else None) or (peer or {}).get("peer_name") or short_destination(key), "last_hops": (peer or {}).get("last_hops")})
+
+@app.post("/messaging/api/conversations/<key>/read")
+@login_required
+def messaging_conversation_read_api(key):
+    if not valid_destination(key): abort(404)
+    require_csrf()
+    # This endpoint is intentionally a narrow durable request only. The
+    # Messaging service remains the database's only writer.
+    messaging_request(f"read-{key}.json", {"conversation_key": key})
+    return "", 204
+
 @app.route("/messaging/new", methods=["GET", "POST"])
 @login_required
 def messaging_new():
@@ -1169,7 +1204,8 @@ def messaging_new():
         elif not body.strip(): flash("Message body cannot be empty.", "error")
         elif len(body) > 4000: flash("Message body must be 4,000 characters or fewer.", "error")
         else:
-            message_id, stamp = secrets.token_hex(16), now()
+            candidate = request.form.get("message_id", "")
+            message_id = candidate.lower() if re.fullmatch(r"[0-9a-fA-F]{32}", candidate) else secrets.token_hex(16)
             # The service owns delivery and records its outcome. The web app
             # only creates an intentionally narrow outbound request.
             messaging_request(f"outbound-{message_id}.json", {"id": message_id, "destination": destination, "body": body})
@@ -1188,7 +1224,9 @@ def messaging_conversation(key):
         require_csrf(); body = request.form.get("body", "")
         if not body.strip() or len(body) > 4000: flash("Enter a message of 1–4,000 characters.", "error")
         else:
-            message_id = secrets.token_hex(16); messaging_request(f"outbound-{message_id}.json", {"id": message_id, "destination": key, "body": body})
+            candidate = request.form.get("message_id", "")
+            message_id = candidate.lower() if re.fullmatch(r"[0-9a-fA-F]{32}", candidate) else secrets.token_hex(16)
+            messaging_request(f"outbound-{message_id}.json", {"id": message_id, "destination": key, "body": body})
             flash("Reply queued. It may remain queued until Reticulum has a route.", "success")
             return redirect(url_for("messaging_conversation", key=key, tab=tab))
     context = messaging_workspace(tab=tab, selected=key)
@@ -1211,7 +1249,7 @@ def messaging_contacts():
         return redirect(url_for("messaging_contacts"))
     destination = request.args.get("destination", "").strip().lower()
     peer = messaging_peer(destination) if valid_destination(destination) else None
-    return render_template("messaging_contacts.html", title="Contacts", rows=messaging_rows("SELECT * FROM contacts ORDER BY name COLLATE NOCASE"), prefill_destination=destination if valid_destination(destination) else "", prefill_name=(peer or {}).get("display_name", ""))
+    return render_template("messaging_contacts.html", title="Contacts", rows=messaging_rows("SELECT * FROM contacts ORDER BY name COLLATE NOCASE"), prefill_destination=destination if valid_destination(destination) else "", prefill_name=(peer or {}).get("peer_name", ""))
 
 @app.route("/messaging/identity", methods=["GET", "POST"])
 @login_required

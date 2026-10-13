@@ -1,14 +1,14 @@
 {% extends 'base.html' %}
 {% block content %}
-<div class="chat-workspace{% if selected %} has-selection{% endif %}">
+<div class="chat-workspace{% if selected %} has-selection{% endif %}" data-tab="{{ tab }}" data-search="{{ search }}">
   <aside class="chat-sidebar">
     <div class="chat-sidebar-head"><h1>Messaging</h1><a class="button" href="{{ url_for('messaging_new') }}">New</a></div>
     <div class="chat-tabs"><a class="{% if tab == 'conversations' %}active{% endif %}" href="{{ url_for('messaging', tab='conversations') }}">Conversations</a><a class="{% if tab == 'announces' %}active{% endif %}" href="{{ url_for('messaging', tab='announces') }}">Announces</a></div>
     <form class="chat-search" method="get" action="{{ url_for('messaging') }}"><input type="hidden" name="tab" value="{{ tab }}"><input name="q" value="{{ search }}" maxlength="80" placeholder="Search {{ 'announces' if tab == 'announces' else 'conversations' }}"><button>Search</button></form>
-    <div class="chat-list">
+    <div class="chat-list" id="messaging-list">
       {% if tab == 'conversations' %}
         {% for item in conversations %}
-        <a class="chat-list-row{% if item.conversation_key == selected %} selected{% endif %}{% if item.unread_count %} unread{% endif %}" href="{{ url_for('messaging_conversation', key=item.conversation_key, tab='conversations') }}"><strong>{{ item.contact_name or item.announced_name or short_destination(item.conversation_key) }}</strong>{% if item.unread_count %}<span class="unread-badge">{{ item.unread_count }}</span>{% endif %}<span class="chat-preview">{{ 'You: ' if item.direction == 'outbound' else '' }}{{ item.body[:90] }}{% if item.body|length > 90 %}…{% endif %}</span><small>{{ format_time(item.received_at) }}</small></a>
+        <a class="chat-list-row{% if item.conversation_key == selected %} selected{% endif %}{% if item.unread_count %} unread{% endif %}" href="{{ url_for('messaging_conversation', key=item.conversation_key, tab='conversations') }}"><strong>{{ item.contact_name or item.peer_name or short_destination(item.conversation_key) }}</strong>{% if item.unread_count %}<span class="unread-badge">{{ item.unread_count }}</span>{% endif %}<span class="chat-preview">{{ 'You: ' if item.direction == 'outbound' else '' }}{{ item.body[:90] }}{% if item.body|length > 90 %}…{% endif %}</span><small>{{ format_time(item.received_at) }}</small></a>
         {% else %}<p class="empty-state">No conversations yet. Choose an announced peer or start a new message.</p>{% endfor %}
       {% else %}
         {% for peer in peers %}
@@ -20,22 +20,145 @@
   </aside>
   <section class="chat-detail">
     {% if selected %}
-      <header class="chat-peer-head"><a class="chat-back" href="{{ url_for('messaging', tab=tab) }}">← Back</a><div><h2>{{ contact.name if contact else (peer.display_name if peer and peer.display_name else short_destination(selected)) }}</h2><code title="{{ selected }}">{{ selected }}</code>{% if peer %}<small>{% if peer.last_hops == 1 %}Direct{% elif peer.last_hops %}{{ peer.last_hops }} hops{% else %}Hops unavailable{% endif %} · Announced names are informational, not proof of identity.</small>{% endif %}</div><div class="chat-peer-actions"><button type="button" class="copy-destination" data-destination="{{ selected }}">Copy Destination</button>{% if not contact %}<a class="button" href="{{ url_for('messaging_contacts', destination=selected) }}">Save Contact</a>{% endif %}</div></header>
-      <div class="message-stream">{% for row in rows %}<article class="message-bubble {{ row.direction }}"><div class="message-body">{{ row.body }}</div><small>{{ format_time(row.received_at) }}{% if row.direction == 'outbound' %} · {{ row.delivery_state }}{% endif %}</small>{% if row.direction == 'outbound' and row.delivery_state == 'Failed' and row.error %}<small class="error">{{ row.error }}</small>{% endif %}</article>{% else %}<p class="empty-state">No messages with this peer yet.</p>{% endfor %}</div>
-      <form class="chat-composer" method="post" action="{{ url_for('messaging_conversation', key=selected, tab=tab) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><textarea name="body" maxlength="4000" required placeholder="Send a message…"></textarea><button>Send</button></form>
+      <header class="chat-peer-head"><a class="chat-back" href="{{ url_for('messaging', tab=tab) }}">← Back</a><div><h2 id="peer-name">{{ contact.name if contact else (peer.peer_name if peer and peer.peer_name else short_destination(selected)) }}</h2><code title="{{ selected }}">{{ selected }}</code><small id="peer-hops">{% if peer %}{% if peer.last_hops == 1 %}Direct{% elif peer.last_hops %}{{ peer.last_hops }} hops{% else %}Hops unavailable{% endif %} · {% endif %}Announced and received names are informational, not proof of identity.</small></div><div class="chat-peer-actions"><button type="button" class="copy-destination" data-destination="{{ selected }}">Copy Destination</button>{% if not contact %}<a class="button" href="{{ url_for('messaging_contacts', destination=selected) }}">Save Contact</a>{% endif %}</div></header>
+      <div class="message-stream" id="message-stream">{% for row in rows %}<article class="message-bubble {{ row.direction }}" data-message-id="{{ row.id }}"><div class="message-body">{{ row.body }}</div><small>{{ format_time(row.received_at) }}{% if row.direction == 'outbound' %} · {{ row.delivery_state }}{% endif %}</small>{% if row.direction == 'outbound' and row.delivery_state == 'Failed' and row.error %}<small class="error">{{ row.error }}</small>{% endif %}</article>{% else %}<p class="empty-state">No messages with this peer yet.</p>{% endfor %}</div>
+      <form class="chat-composer" id="chat-composer" method="post" action="{{ url_for('messaging_conversation', key=selected, tab=tab) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="message_id" value=""><textarea name="body" maxlength="4000" required placeholder="Send a message…"></textarea><button>Send</button></form>
     {% else %}
       <div class="chat-empty"><h2>{{ 'Choose an announced peer' if tab == 'announces' else 'Choose a conversation' }}</h2><p>{{ 'Selecting an announced LXMF destination opens a text-only conversation.' if tab == 'announces' else 'Choose an existing conversation, an announced peer, or start a new message.' }}</p></div>
     {% endif %}
   </section>
 </div>
-{% if selected %}<script>
+<script>
   (function () {
-    function showNewestMessage() {
-      const stream = document.querySelector(".message-stream");
-      if (stream) stream.scrollTop = stream.scrollHeight;
+    const workspace = document.querySelector(".chat-workspace");
+    if (!workspace || !window.fetch) return;
+    const tab = workspace.dataset.tab;
+    const search = workspace.dataset.search || "";
+    const selected = {{ selected|tojson }};
+    const stream = document.getElementById("message-stream");
+    const list = document.getElementById("messaging-list");
+    const composer = document.getElementById("chat-composer");
+    const pendingKey = selected ? "reticulum-admin-pending-" + selected : "";
+    let fastPolls = 0;
+    let lastReadRequestAt = 0;
+
+    function nearBottom() { return !stream || stream.scrollHeight - stream.scrollTop - stream.clientHeight < 96; }
+    function scrollBottom() { if (stream) stream.scrollTop = stream.scrollHeight; }
+    function text(element, value) { element.textContent = value || ""; return element; }
+    function pendingMessage() {
+      try { return selected ? JSON.parse(sessionStorage.getItem(pendingKey)) : null; }
+      catch (_) { return null; }
     }
-    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", showNewestMessage);
-    else showNewestMessage();
+    function messageBubble(message) {
+      const article = document.createElement("article");
+      article.className = "message-bubble " + message.direction;
+      article.dataset.messageId = message.id;
+      article.appendChild(text(document.createElement("div"), message.body)).className = "message-body";
+      const details = document.createElement("small");
+      text(details, (message.timestamp || "Just now") + (message.direction === "outbound" ? " · " + message.delivery_state : ""));
+      article.appendChild(details);
+      if (message.direction === "outbound" && message.delivery_state === "Failed" && message.error) {
+        const error = text(document.createElement("small"), message.error); error.className = "error"; article.appendChild(error);
+      }
+      return article;
+    }
+    function renderMessages(messages, initial) {
+      if (!stream) return;
+      const follow = initial || nearBottom();
+      const pending = pendingMessage();
+      if (pending && messages.some((item) => item.id === pending.id)) sessionStorage.removeItem(pendingKey);
+      const visible = pending && !messages.some((item) => item.id === pending.id) ? messages.concat([pending]) : messages;
+      stream.replaceChildren();
+      if (!visible.length) stream.appendChild(text(document.createElement("p"), "No messages with this peer yet.")).className = "empty-state";
+      visible.forEach((item) => stream.appendChild(messageBubble(item)));
+      if (follow) scrollBottom();
+    }
+    function updateUnread(total) {
+      const nav = document.querySelector('nav a[href="/messaging"]');
+      if (nav) nav.textContent = total ? "Messaging (" + total + ")" : "Messaging";
+    }
+    function renderList(data) {
+      if (!list) return;
+      const rows = data.tab === "announces" ? data.peers : data.conversations;
+      list.replaceChildren();
+      if (!rows.length) {
+        list.appendChild(text(document.createElement("p"), data.tab === "announces" ? "No LXMF delivery announces have been observed yet." : "No conversations yet. Choose an announced peer or start a new message.")).className = "empty-state";
+        return;
+      }
+      rows.forEach((item) => {
+        const link = document.createElement("a");
+        const destination = item.destination;
+        link.href = "/messaging/conversations/" + encodeURIComponent(destination) + "?tab=" + encodeURIComponent(data.tab);
+        link.className = "chat-list-row" + (destination === selected ? " selected" : "") + (item.unread ? " unread" : "");
+        link.appendChild(text(document.createElement("strong"), item.name));
+        if (item.unread) link.appendChild(text(document.createElement("span"), item.unread)).className = "unread-badge";
+        link.appendChild(text(document.createElement("span"), data.tab === "announces" ? destination.slice(0, 6) + "…" + destination.slice(-6) : item.preview)).className = "chat-preview";
+        const detail = data.tab === "announces" ? item.activity + " · " + (item.hops === 1 ? "Direct" : item.hops ? item.hops + " hops" : "Hops unavailable") : item.activity;
+        link.appendChild(text(document.createElement("small"), detail));
+        list.appendChild(link);
+      });
+    }
+    async function refreshWorkspace() {
+      try {
+        const response = await fetch("/messaging/api/workspace?tab=" + encodeURIComponent(tab) + "&q=" + encodeURIComponent(search), {credentials: "same-origin", cache: "no-store"});
+        if (!response.ok) return;
+        const data = await response.json(); renderList(data); updateUnread(data.unread_total);
+      } catch (_) {}
+    }
+    async function refreshConversation(initial) {
+      if (!selected) return;
+      try {
+        const response = await fetch("/messaging/api/conversations/" + encodeURIComponent(selected), {credentials: "same-origin", cache: "no-store"});
+        if (!response.ok) return;
+        const data = await response.json(); renderMessages(data.messages, initial); updateUnread(data.unread_total);
+        const name = document.getElementById("peer-name"); if (name) name.textContent = data.peer_name;
+        const hops = document.getElementById("peer-hops"); if (hops) hops.textContent = (data.last_hops === 1 ? "Direct" : data.last_hops ? data.last_hops + " hops" : "Hops unavailable") + " · Announced and received names are informational, not proof of identity.";
+        requestMarkRead(data);
+      } catch (_) {}
+    }
+    async function requestMarkRead(data) {
+      if (!composer || !data.unread_inbound || document.visibilityState !== "visible" || Date.now() - lastReadRequestAt < 3000) return;
+      const csrf = composer.querySelector('input[name="csrf_token"]');
+      if (!csrf || !csrf.value) return;
+      lastReadRequestAt = Date.now();
+      try {
+        await fetch("/messaging/api/conversations/" + encodeURIComponent(selected) + "/read", {
+          method: "POST", credentials: "same-origin",
+          headers: {"Content-Type": "application/x-www-form-urlencoded"},
+          body: "csrf_token=" + encodeURIComponent(csrf.value)
+        });
+      } catch (_) {}
+    }
+    function schedule() {
+      const delay = fastPolls > 0 ? 2000 : 5000;
+      if (fastPolls > 0) fastPolls -= 1;
+      window.setTimeout(async function () { await refreshConversation(false); await refreshWorkspace(); schedule(); }, delay);
+    }
+    if (stream) {
+      if (pendingMessage()) renderMessages([], true);
+      else scrollBottom();
+      refreshConversation(true);
+      document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") refreshConversation(false); });
+    }
+    refreshWorkspace();
+    if (composer) {
+      const body = composer.querySelector('textarea[name="body"]');
+      const id = composer.querySelector('input[name="message_id"]');
+      function newId() { return window.crypto && crypto.randomUUID ? crypto.randomUUID().replace(/-/g, "") : Array.from({length: 32}, () => Math.floor(Math.random() * 16).toString(16)).join(""); }
+      composer.addEventListener("submit", function (event) {
+        if (!body.value.trim()) { event.preventDefault(); return; }
+        if (!id.value) id.value = newId();
+        try { sessionStorage.setItem(pendingKey, JSON.stringify({id: id.value, direction: "outbound", body: body.value, timestamp: "Just now", delivery_state: "Pending"})); } catch (_) {}
+      });
+      body.addEventListener("keydown", function (event) {
+        if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+          event.preventDefault();
+          if (body.value.trim()) composer.requestSubmit();
+        }
+      });
+    }
+    if (pendingMessage()) fastPolls = 10;
+    schedule();
   }());
-</script>{% endif %}
+</script>
 {% endblock %}

@@ -112,6 +112,23 @@ if ! wait_for 10 python3 -c "import sqlite3; row=sqlite3.connect('$messaging_sta
   echo "Messaging service did not persist an LXMF announce" >&2
   exit 1
 fi
+# Status exposes the passive listener's public-announcement observability
+# without relying on logs. The injected peer counts as a stored announced peer;
+# the per-process observed counter remains owned by the running service.
+if ! wait_for 10 python3 -c "import json; value=json.load(open('$messaging_state/status.json')); assert 'lxmf_delivery_announces_observed' in value and 'last_lxmf_delivery_announce' in value and value.get('unique_lxmf_delivery_peers', 0) >= 1"; then
+  docker logs "$messaging_container" >&2 || true
+  echo "Messaging announce observability was not published" >&2
+  exit 1
+fi
+# An inbound message can provide only informational sender presentation
+# metadata. The packaged service keeps it separate from a public announce and
+# does not create a contact or perform any action beyond local persistence.
+docker exec "$messaging_container" python -c "import types, messaging; service=messaging.Messaging(); service.destination=types.SimpleNamespace(hash=b'operator'); source=types.SimpleNamespace(hash=bytes.fromhex('eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'), display_name='CI Incoming Name'); service.receive(types.SimpleNamespace(source=source, source_hash=source.hash, content_as_string=lambda: 'private test message'))"
+if ! wait_for 10 python3 -c "import sqlite3; row=sqlite3.connect('$messaging_state/messages.db').execute(\"select message_display_name,announce_count from announced_peers where destination_hash='eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'\").fetchone(); assert row == ('CI Incoming Name', 0)"; then
+  docker logs "$messaging_container" >&2 || true
+  echo "Messaging service did not persist safe inbound sender metadata" >&2
+  exit 1
+fi
 # A prior process can die after SQLite says Queued but before its in-memory
 # LXMF callback completes. On the next process startup it must be retried,
 # rather than remaining stranded in Queued forever.

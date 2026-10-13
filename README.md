@@ -119,7 +119,11 @@ Local mode binds to `127.0.0.1`; network mode binds to `0.0.0.0`. Network mode d
 
 Messaging provides a persistent LXMF identity hosted by the Reticulum Admin node. It can receive and store messages while a desktop or mobile client is offline, and lets an authenticated administrator read and reply from the web interface.
 
-Messaging groups stored messages into Conversations. The Messaging → Announces tab is a separate, chat-oriented directory of recently observed `lxmf.delivery` announces; selecting an announced peer opens a text-only conversation, even before messages have been exchanged. An announced display name is informational only and is not proof of identity. A saved Contact name always takes precedence over an announced name for local presentation. Announce observation is passive: it does not connect, message, save, or trust a peer automatically.
+Messaging groups stored messages into Conversations. The Messaging → Announces tab is a separate, chat-oriented directory of recently observed `lxmf.delivery` announces; selecting an announced peer opens a text-only conversation, even before messages have been exchanged. Announce observation is passive: it does not connect, message, save, or trust a peer automatically.
+
+The chat workspace uses small authenticated read-only polls instead of WebSockets: roughly every two seconds just after sending, then about every five seconds while viewing. This lets queued messages, delivery changes, new inbound messages, unread badges, and new announces appear without a manual refresh. It works with the normal page flow when JavaScript is unavailable and is designed to remain usable in mobile Safari.
+
+Names are presentation hints, not authentication. A saved Contact name takes precedence, followed by the latest public LXMF announce name, then a display name supplied by an incoming message when the pinned runtime exposes one, then a shortened destination hash. The Messaging service only records delivery announces it receives after it starts. With the pinned RNS/LXMF APIs there is no supported safe enumeration of historic announce app-data, so it does not scrape logs or invent peers that another client may have retained.
 
 The workspace adapts for phones and iPhone Safari: narrow screens show the conversation/announce list first, then a full-width conversation with a Back control and usable bottom composer. v0.7.1 remains text-only; it does not provide file, image, audio, voice, or other attachments.
 

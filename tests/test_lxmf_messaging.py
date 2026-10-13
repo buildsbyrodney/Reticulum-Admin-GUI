@@ -257,11 +257,27 @@ class MessagingServiceTests(unittest.TestCase):
             self.assertEqual(row["identity_hash"], "b" * 32)
             self.assertEqual(row["last_hops"], 1)
             self.assertEqual(row["announce_count"], 3)
+            self.assertEqual(service.state["lxmf_delivery_announces_observed"], 3)
+            self.assertIsNotNone(service.state["last_lxmf_delivery_announce"])
+            service.status()
+            status = json.loads((messaging.STATE / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["lxmf_delivery_announces_observed"], 3)
+            self.assertEqual(status["unique_lxmf_delivery_peers"], 1)
         finally:
             if old_rns is None: sys.modules.pop("RNS", None)
             else: sys.modules["RNS"] = old_rns
             if old_lxmf is None: sys.modules.pop("LXMF", None)
             else: sys.modules["LXMF"] = old_lxmf
+
+    def test_received_sender_name_is_persisted_as_informational_peer_metadata(self):
+        target = "d" * 32
+        service = messaging.Messaging(); service.destination = types.SimpleNamespace(hash=b"operator")
+        source = types.SimpleNamespace(hash=bytes.fromhex(target), display_name="VM Chat Name")
+        service.receive(types.SimpleNamespace(source=source, source_hash=source.hash, content_as_string=lambda: "hello"))
+        with messaging.connect() as con:
+            row = con.execute("SELECT message_display_name,announce_count FROM announced_peers WHERE destination_hash=?", (target,)).fetchone()
+        self.assertEqual(row["message_display_name"], "VM Chat Name")
+        self.assertEqual(row["announce_count"], 0)
 
     def test_invalid_announce_metadata_is_safe_and_listener_is_aspect_limited(self):
         registered = []
@@ -295,18 +311,29 @@ class MessagingWebContractTests(unittest.TestCase):
     def test_navigation_and_privacy_contract_are_present(self):
         base = (ROOT / "reticulum-admin" / "templates" / "base.html").read_text(encoding="utf-8")
         inbox = (ROOT / "reticulum-admin" / "templates" / "messaging.html").read_text(encoding="utf-8")
+        compose = (ROOT / "reticulum-admin" / "templates" / "messaging_new.html").read_text(encoding="utf-8")
         identity = (ROOT / "reticulum-admin" / "templates" / "messaging_identity.html").read_text(encoding="utf-8")
         self.assertIn("Messaging", base); self.assertIn("messaging_unread", base); self.assertIn("Conversations", inbox); self.assertIn("Announces", inbox); self.assertIn("message-bubble", inbox); self.assertIn("maxlength=\"4000\"", inbox); self.assertNotIn("Add Files", inbox); self.assertNotIn("Add Image", inbox); self.assertNotIn("Add Voice", inbox); self.assertIn("separate from the Bot", identity)
 
     def test_chat_layout_has_responsive_mobile_and_plain_text_contracts(self):
         style = (ROOT / "reticulum-admin" / "static" / "app.css").read_text(encoding="utf-8")
         inbox = (ROOT / "reticulum-admin" / "templates" / "messaging.html").read_text(encoding="utf-8")
+        compose = (ROOT / "reticulum-admin" / "templates" / "messaging_new.html").read_text(encoding="utf-8")
         self.assertIn("@media (max-width: 700px)", style)
         self.assertIn(".chat-workspace.has-selection .chat-sidebar", style)
         self.assertIn(".chat-composer", style)
         self.assertIn("white-space: pre-wrap", style)
-        self.assertIn("Announced names are informational, not proof of identity.", inbox)
+        self.assertIn("Announced and received names are informational, not proof of identity.", inbox)
         self.assertIn("stream.scrollTop = stream.scrollHeight", inbox)
+        self.assertIn("event.isComposing", inbox)
+        self.assertIn("!event.shiftKey", inbox)
+        self.assertIn("composer.requestSubmit()", inbox)
+        self.assertIn("/messaging/api/conversations/", inbox)
+        self.assertIn("reticulum-admin-pending-", inbox)
+        self.assertIn("reticulum-admin-pending-", compose)
+        self.assertIn("2000", inbox); self.assertIn("5000", inbox)
+        self.assertIn("document.visibilityState", inbox)
+        self.assertIn("/read", inbox)
 
     def test_workspace_groups_conversations_and_prefers_contact_then_announce_name(self):
         old_env = {key: os.environ.get(key) for key in ("APP_DATA", "MESSAGING_DIR", "MESSAGING_REQUEST_DIR", "ADMIN_SECRET_KEY")}
@@ -317,7 +344,7 @@ class MessagingWebContractTests(unittest.TestCase):
             messaging.STATE, messaging.REQUESTS = state, Path(temporary) / "requests"
             try:
                 with messaging.connect() as con:
-                    con.execute("INSERT INTO announced_peers VALUES(?,?,?,?,?,?,?)", ("a" * 32, None, "Announced Alice", 1, 1, 1, 1))
+                    con.execute("INSERT INTO announced_peers(destination_hash,identity_hash,display_name,message_display_name,first_seen,last_seen,last_hops,announce_count) VALUES(?,?,?,?,?,?,?,?)", ("a" * 32, None, "Announced Alice", "Received Alice", 1, 1, 1, 1))
                     con.execute("INSERT INTO contacts(name,destination,notes,created_at,updated_at) VALUES(?,?,?,?,?)", ("Saved Alice", "a" * 32, None, 1, 1))
                     con.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", ("first", "a" * 32, "inbound", "a" * 32, "operator", None, "older", 10, None, "Received", None, 10, 10))
                     con.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", ("newest", "a" * 32, "outbound", "operator", "a" * 32, None, "newest preview", 30, None, "Queued", None, 30, 30))
@@ -330,8 +357,62 @@ class MessagingWebContractTests(unittest.TestCase):
                 self.assertEqual([row["conversation_key"] for row in rows], ["a" * 32, "b" * 32])
                 self.assertEqual(rows[0]["body"], "newest preview")
                 self.assertEqual(rows[0]["contact_name"], "Saved Alice")
-                self.assertEqual(rows[0]["announced_name"], "Announced Alice")
+                self.assertEqual(rows[0]["peer_name"], "Announced Alice")
                 self.assertEqual(rows[1]["contact_name"], None)
+                workspace = app_module.messaging_workspace_json()
+                self.assertEqual(workspace["conversations"][0]["name"], "Saved Alice")
+                # The local contact is strongest, followed by public announce
+                # metadata, then an informational name supplied with a message.
+                with messaging.connect() as con:
+                    con.execute("DELETE FROM contacts WHERE destination=?", ("a" * 32,))
+                self.assertEqual(app_module.messaging_workspace_json()["conversations"][0]["name"], "Announced Alice")
+                with messaging.connect() as con:
+                    con.execute("UPDATE announced_peers SET display_name=NULL WHERE destination_hash=?", ("a" * 32,))
+                self.assertEqual(app_module.messaging_workspace_json()["conversations"][0]["name"], "Received Alice")
+                anonymous = app_module.app.test_client()
+                self.assertEqual(anonymous.post("/messaging/api/conversations/" + "a" * 32 + "/read").status_code, 302)
+                client = app_module.app.test_client()
+                self.assertEqual(client.get("/messaging/api/conversations/" + "a" * 32).status_code, 302)
+                with client.session_transaction() as session:
+                    session["admin"] = "test-admin"
+                response = client.get("/messaging/api/conversations/" + "a" * 32)
+                self.assertEqual(response.status_code, 200)
+                self.assertLessEqual(len(response.get_json()["messages"]), 200)
+                self.assertEqual(response.get_json()["unread_inbound"], 1)
+                # Polling GETs remain read-only. A visible conversation instead
+                # asks the service-owned request path to mark just that thread.
+                with messaging.connect() as con:
+                    self.assertIsNone(con.execute("SELECT read_at FROM messages WHERE id='first'").fetchone()[0])
+                    self.assertIsNone(con.execute("SELECT read_at FROM messages WHERE id='other'").fetchone()[0])
+                self.assertEqual(client.post("/messaging/api/conversations/" + "a" * 32 + "/read").status_code, 400)
+                with client.session_transaction() as session:
+                    session["csrf"] = "read-csrf"
+                self.assertEqual(client.post("/messaging/api/conversations/" + "a" * 32 + "/read", data={"csrf_token": "wrong"}).status_code, 400)
+                self.assertEqual(client.post("/messaging/api/conversations/" + "a" * 32 + "/read", data={"csrf_token": "read-csrf"}).status_code, 204)
+                request_file = Path(temporary) / "requests" / ("read-" + "a" * 32 + ".json")
+                self.assertEqual(json.loads(request_file.read_text(encoding="utf-8")), {"conversation_key": "a" * 32})
+                with messaging.connect() as con:
+                    self.assertIsNone(con.execute("SELECT read_at FROM messages WHERE id='first'").fetchone()[0])
+                messaging.Messaging().process_requests()
+                with messaging.connect() as con:
+                    self.assertIsNotNone(con.execute("SELECT read_at FROM messages WHERE id='first'").fetchone()[0])
+                    self.assertIsNone(con.execute("SELECT read_at FROM messages WHERE id='other'").fetchone()[0])
+                    con.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", ("late-inbound", "a" * 32, "inbound", "a" * 32, "operator", "Late Alice", "appears through polling", 40, None, "Received", None, 40, 40))
+                polled = client.get("/messaging/api/conversations/" + "a" * 32).get_json()
+                self.assertTrue(any(row["id"] == "late-inbound" for row in polled["messages"]))
+                self.assertEqual(polled["unread_inbound"], 1)
+                # The polling payload is bounded even for a busy conversation,
+                # and it reflects durable outbound state changes without a page reload.
+                with messaging.connect() as con:
+                    for index in range(205):
+                        con.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (f"cap-{index}", "c" * 32, "outbound", "operator", "c" * 32, None, f"queued {index}", index, None, "Queued", None, index, index))
+                    con.execute("UPDATE messages SET delivery_state='Delivered' WHERE id='cap-204'")
+                    con.execute("INSERT INTO announced_peers(destination_hash,identity_hash,display_name,message_display_name,first_seen,last_seen,last_hops,announce_count) VALUES(?,?,?,?,?,?,?,?)", ("e" * 32, None, "Polled announce", None, 1, 2, 1, 1))
+                capped = client.get("/messaging/api/conversations/" + "c" * 32).get_json()
+                self.assertEqual(len(capped["messages"]), 200)
+                self.assertEqual(capped["messages"][-1]["delivery_state"], "Delivered")
+                announces = client.get("/messaging/api/workspace?tab=announces").get_json()
+                self.assertTrue(any(peer["name"] == "Polled announce" for peer in announces["peers"]))
             finally:
                 messaging.STATE, messaging.REQUESTS = original_state, original_requests
                 sys.path[:] = old_path
