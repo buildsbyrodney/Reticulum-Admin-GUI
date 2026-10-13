@@ -62,7 +62,7 @@ The Bot bundles a complete offline KJV verse catalog generated from [OpenBible's
 ## Install on Ubuntu/Linux
 
 ```sh
-wget https://raw.githubusercontent.com/buildsbyrodney/Reticulum-Admin-GUI/main/install.sh
+wget -O install.sh https://raw.githubusercontent.com/buildsbyrodney/Reticulum-Admin-GUI/main/install.sh
 chmod +x install.sh
 ./install.sh
 ```
@@ -70,12 +70,14 @@ chmod +x install.sh
 Or:
 
 ```sh
-curl -fLO https://raw.githubusercontent.com/buildsbyrodney/Reticulum-Admin-GUI/main/install.sh
+curl -fL https://raw.githubusercontent.com/buildsbyrodney/Reticulum-Admin-GUI/main/install.sh -o install.sh
 chmod +x install.sh
 ./install.sh
 ```
 
 The installer is a normal file you can inspect before execution. It downloads a tagged stable release archive, verifies SHA-256 before extracting, and does not normally install arbitrary application files from `main`.
+
+If Reticulum Admin is already installed, normally run the installed `./install.sh` from that installation directory and choose **Update**. This avoids downloading a second installer with a name such as `install.sh.1` and accidentally running an older copy.
 
 The installer checks Docker and Compose, asks for a port (default `8740`), access mode (`local` is the default), and timezone (default `America/Chicago`). On Debian, Ubuntu, Raspberry Pi OS, and other Debian-derived systems, it offers to install missing Docker Engine and Compose v2 from Docker's official APT repository. The default interactive answer is Yes; non-interactive use requires `INSTALL_DOCKER=yes`. It checks an occupied port when `ss` is available, creates a restricted `.env`, generates a random `ADMIN_SECRET_KEY`, then builds and starts the services. It preserves an existing `.env` unless you explicitly choose to replace it.
 
@@ -86,7 +88,7 @@ If Docker is installed but the current account cannot reach its daemon, the inst
 Download the installer for inspection, then run it; do not use `curl | bash`:
 
 ```sh
-wget https://raw.githubusercontent.com/buildsbyrodney/Reticulum-Admin-GUI/main/install.sh
+wget -O install.sh https://raw.githubusercontent.com/buildsbyrodney/Reticulum-Admin-GUI/main/install.sh
 chmod +x install.sh
 ./install.sh
 ```
