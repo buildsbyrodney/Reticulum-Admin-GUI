@@ -76,7 +76,7 @@ def format_bytes(value):
         if value < 1024 or unit == units[-1]: return f"{value:.1f} {unit}" if unit != "B" else f"{value} B"
         value /= 1024
 
-BOT_DEFAULTS = {"enabled": True, "display_name": "Reticulum Admin Test Bot", "announce_on_startup": True, "periodic_announce": True, "interval_minutes": 60}
+BOT_DEFAULTS = {"enabled": True, "display_name": "Reticulum Admin Test Bot", "tagline": "Send HELP for commands", "announce_on_startup": True, "periodic_announce": True, "interval_minutes": 60, "rate_limit_per_minute": 12}
 def atomic_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True); temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value), encoding="utf-8"); os.replace(temporary, path)
@@ -1074,7 +1074,12 @@ def test_echo_bot():
             if interval < 15:
                 flash("Periodic announce interval must be at least 15 minutes.", "error")
                 return redirect(url_for("test_echo_bot"))
-            settings.update({"enabled": bool(request.form.get("enabled")), "display_name": request.form.get("display_name", "").strip()[:80] or BOT_DEFAULTS["display_name"], "announce_on_startup": bool(request.form.get("announce_on_startup")), "periodic_announce": bool(request.form.get("periodic_announce")), "interval_minutes": interval})
+            try: rate_limit = int(request.form.get("rate_limit_per_minute", ""))
+            except ValueError: rate_limit = 0
+            if not 1 <= rate_limit <= 120:
+                flash("Message rate limit must be between 1 and 120 messages per sender per minute.", "error")
+                return redirect(url_for("test_echo_bot"))
+            settings.update({"enabled": bool(request.form.get("enabled")), "display_name": request.form.get("display_name", "").strip()[:80] or BOT_DEFAULTS["display_name"], "tagline": request.form.get("tagline", "").strip()[:160] or BOT_DEFAULTS["tagline"], "announce_on_startup": bool(request.form.get("announce_on_startup")), "periodic_announce": bool(request.form.get("periodic_announce")), "interval_minutes": interval, "rate_limit_per_minute": rate_limit})
             atomic_json(BOT_CONFIG_DIR / "settings.json", settings); audit("bot_settings", "Test Echo Bot settings changed"); flash("Bot settings saved.", "success")
         elif action == "announce":
             (BOT_CONFIG_DIR / "announce-request").parent.mkdir(parents=True, exist_ok=True); (BOT_CONFIG_DIR / "announce-request").write_text(str(now())); audit("bot_announce_requested", "Manual Test Echo Bot announce requested"); flash("Manual announce requested.", "success")

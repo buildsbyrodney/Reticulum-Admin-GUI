@@ -41,13 +41,14 @@ The **Diagnostics** page separates network-facing configuration checks from Reti
 
 `lxmf-test-bot` is a separate, non-administrative service with its own persistent LXMF identity. It uses Linux host networking solely to attach to the same local Reticulum shared-instance socket as `rnsd`; it publishes no ports and never has the management token, Docker socket, admin database, or configuration-write access. Its identity and LXMF destination persist under `data/bot/`.
 
-Open **Bot**, copy or announce its LXMF destination, then message it from MeshChat:
+Open **Bot**, copy or announce its LXMF destination, then message it from MeshChat. The bot is local/offline by default; it has no AI or Internet dependency and cannot administer the node remotely:
 
 ```text
+MENU / HELP   → command list
 PING          → PONG
-ECHO hello    → Echo: hello
-HELP          → command list
 STATUS        → safe read-only node summary
+TEST, JOKE, DADJOKE, 8BALL <question>, FACT, COFFEE, RADIO
+VERSE or VERSE John 3:16 → curated local KJV verse
 ```
 
 The bot announces on startup and every 60 minutes by default; the GUI enforces a 15-minute minimum periodic interval. It stores only operational metadata such as counters and timestamps, not message bodies. After updating on a Pi: announce the bot, add or discover the destination in MeshChat, send `PING`, restart only `lxmf-test-bot`, confirm its destination is unchanged, and send `PING` again. Test remote peers through a known route only after local VM messaging succeeds.

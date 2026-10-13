@@ -61,6 +61,20 @@ if ! wait_for 35 sh -c "test -s '$bot_status/status.json' && grep -q '\"running\
   echo "LXMF bot did not attach to the rnsd shared instance" >&2
   exit 1
 fi
+bot_destination_before=$(python3 -c "import json; print(json.load(open('$bot_status/status.json'))['destination'])")
+# Exercise the command parser from the actual built bot image. This protects
+# the image contents (rather than only host unit tests) and confirms Unicode
+# source files survive the image build.
+docker exec "$bot_container" python -c 'from bot import CommandProcessor, TEST; p=CommandProcessor(lambda: {"transport":"On","paths":2,"interfaces":1,"clients":0,"uptime":"0m"}); assert "Diagnostics" in p.reply("MENU"); assert p.reply("TEST") in TEST; assert "John 3:16 KJV" in p.reply("VERSE John 3:16")'
+printf '%s' '{"display_name":"W4OWE Test Bot 🤖","tagline":"Send HELP for commands"}' > "$bot_config/settings.json"
+docker restart "$bot_container" >/dev/null
+if ! wait_for 35 sh -c "test -s '$bot_status/status.json' && grep -q 'W4OWE Test Bot' '$bot_status/status.json'"; then
+  docker logs "$bot_container" >&2 || true
+  echo "Bot did not restore its Unicode presentation after restart" >&2
+  exit 1
+fi
+bot_destination_after=$(python3 -c "import json; print(json.load(open('$bot_status/status.json'))['destination'])")
+test "$bot_destination_before" = "$bot_destination_after"
 docker exec "$rnsd_container" rnstatus --config /root/.reticulum | grep -Eq 'Serving[[:space:]]*:[[:space:]]*1 program'
 
 # Actual management image applies the same config path the GUI uses. The rnsd
