@@ -65,6 +65,7 @@
     function renderMessages(messages, initial) {
       if (!stream) return;
       const follow = initial || nearBottom();
+      const previousTop = stream.scrollTop;
       const pending = pendingMessage();
       if (pending && messages.some((item) => item.id === pending.id)) sessionStorage.removeItem(pendingKey);
       const visible = pending && !messages.some((item) => item.id === pending.id) ? messages.concat([pending]) : messages;
@@ -72,6 +73,7 @@
       if (!visible.length) stream.appendChild(text(document.createElement("p"), "No messages with this peer yet.")).className = "empty-state";
       visible.forEach((item) => stream.appendChild(messageBubble(item)));
       if (follow) scrollBottom();
+      else stream.scrollTop = previousTop;
     }
     function updateUnread(total) {
       const nav = document.querySelector('nav a[href="/messaging"]');

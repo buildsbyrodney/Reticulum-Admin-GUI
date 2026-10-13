@@ -325,6 +325,8 @@ class MessagingWebContractTests(unittest.TestCase):
         self.assertIn("white-space: pre-wrap", style)
         self.assertIn("Announced and received names are informational, not proof of identity.", inbox)
         self.assertIn("stream.scrollTop = stream.scrollHeight", inbox)
+        self.assertIn("const previousTop = stream.scrollTop", inbox)
+        self.assertIn("stream.scrollTop = previousTop", inbox)
         self.assertIn("event.isComposing", inbox)
         self.assertIn("!event.shiftKey", inbox)
         self.assertIn("composer.requestSubmit()", inbox)
@@ -334,6 +336,7 @@ class MessagingWebContractTests(unittest.TestCase):
         self.assertIn("2000", inbox); self.assertIn("5000", inbox)
         self.assertIn("document.visibilityState", inbox)
         self.assertIn("/read", inbox)
+        self.assertNotIn("column-reverse", style)
 
     def test_workspace_groups_conversations_and_prefers_contact_then_announce_name(self):
         old_env = {key: os.environ.get(key) for key in ("APP_DATA", "MESSAGING_DIR", "MESSAGING_REQUEST_DIR", "ADMIN_SECRET_KEY")}
@@ -378,6 +381,7 @@ class MessagingWebContractTests(unittest.TestCase):
                 response = client.get("/messaging/api/conversations/" + "a" * 32)
                 self.assertEqual(response.status_code, 200)
                 self.assertLessEqual(len(response.get_json()["messages"]), 200)
+                self.assertEqual([row["id"] for row in response.get_json()["messages"]], ["first", "newest"])
                 self.assertEqual(response.get_json()["unread_inbound"], 1)
                 # Polling GETs remain read-only. A visible conversation instead
                 # asks the service-owned request path to mark just that thread.
