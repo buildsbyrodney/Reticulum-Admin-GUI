@@ -104,7 +104,7 @@ test "$messaging_destination_before" != "$bot_destination_after"
 # A prior process can die after SQLite says Queued but before its in-memory
 # LXMF callback completes. On the next process startup it must be retried,
 # rather than remaining stranded in Queued forever.
-python3 -c "import sqlite3; con=sqlite3.connect('$messaging_state/messages.db'); con.execute(\"insert into messages(id,conversation_key,direction,sender_destination,recipient_destination,body,received_at,delivery_state,created_at,updated_at) values ('recovery-test','fedcba9876543210fedcba9876543210','outbound','operator','fedcba9876543210fedcba9876543210','actual image interrupted queue recovery',1,'Queued',1,1)\"); con.commit()"
+docker exec "$messaging_container" python -c "import sqlite3; con=sqlite3.connect('/messaging/messages.db'); con.execute(\"insert into messages(id,conversation_key,direction,sender_destination,recipient_destination,body,received_at,delivery_state,created_at,updated_at) values ('recovery-test','fedcba9876543210fedcba9876543210','outbound','operator','fedcba9876543210fedcba9876543210','actual image interrupted queue recovery',1,'Queued',1,1)\"); con.commit()"
 docker restart "$messaging_container" >/dev/null
 if ! wait_for 35 sh -c "test -s '$messaging_state/status.json' && grep -q '\"running\": true' '$messaging_state/status.json'"; then
   docker logs "$messaging_container" >&2 || true
