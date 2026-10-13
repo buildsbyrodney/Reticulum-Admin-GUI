@@ -211,6 +211,7 @@ class LiveRnstatusTests(unittest.TestCase):
 
     def test_discovery_announce_status_does_not_fabricate_a_timestamp(self):
         client = self.client()
+        self.app_module.CONFIG_VIEW_CACHE["config"]["discovery_capabilities"] = {"supported": True}
         page = client.get("/discovery").get_data(as_text=True)
         self.assertIn("Last discovery announce:", page)
         self.assertIn("Not exposed by this Reticulum runtime", page)
