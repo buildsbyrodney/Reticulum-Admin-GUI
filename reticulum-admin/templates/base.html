@@ -17,6 +17,14 @@
   <main>{% with messages=get_flashed_messages(with_categories=true) %}{% for category,message in messages %}<p class="flash {{ category }}">{{ message }}</p>{% endfor %}{% endwith %}{% block content %}{% endblock %}</main>
   <footer>Reticulum Admin v{{ app_version }} · Access: {{ access_mode }} · Times: {{ server_timezone }} · Web UI has no Docker socket.</footer>
   <script>
+    // Browsers may increment a focused number input on a normal page scroll.
+    // Removing focus before the default wheel action keeps the scroll for the
+    // page while requiring typing or the input's own controls to change data.
+    document.addEventListener("wheel", function (event) {
+      const input = event.target.closest && event.target.closest('input[type="number"]');
+      if (input && document.activeElement === input) input.blur();
+    }, { capture: true, passive: true });
+
     document.addEventListener("submit", function (event) {
       const form = event.target;
       if (!form.action.endsWith("/configuration/preview")) return;
