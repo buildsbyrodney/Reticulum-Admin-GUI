@@ -35,7 +35,7 @@ class EchoBotTests(unittest.TestCase):
         self.assertIn(processor.reply("COFFEE"), bot.COFFEE)
         self.assertIn(processor.reply("RADIO"), bot.RADIO)
         self.assertIn("John 3:16 KJV", processor.reply("verse john 3:16"))
-        self.assertIn("not in my local KJV", processor.reply("VERSE Genesis 99:99"))
+        self.assertEqual(processor.reply("VERSE Genesis 99:99"), "That reference is not in my local KJV library.")
         self.assertIn("KJV", processor.reply("VERSE"))
 
     def test_expanded_libraries_and_generated_kjv_integrity(self):
@@ -66,6 +66,8 @@ class EchoBotTests(unittest.TestCase):
         self.assertIn("John 3:16 KJV", processor.reply("VERSE Jn 3:16")); self.assertIn("Romans 8:28 KJV", processor.reply("VERSE Rom 8:28"))
         self.assertIn("1 Corinthians 13:4 KJV", processor.reply("VERSE 1 Cor 13:4"))
         self.assertIn("1 Corinthians 13:4 KJV", processor.reply("VERSE I Corinthians 13:4"))
+        self.assertIn("Philippians 4:13 KJV", processor.reply("VERSE Phil 4:13"))
+        self.assertIn("Revelation 22:21 KJV", processor.reply("VERSE Rev 22:21"))
         self.assertIn("KJV", processor.reply("VERSE faith"))
 
     def test_random_responses_do_not_immediately_repeat(self):

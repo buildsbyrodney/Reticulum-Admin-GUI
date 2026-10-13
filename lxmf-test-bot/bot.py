@@ -72,7 +72,7 @@ class CommandProcessor:
         return value
     def normalise_reference(self, reference):
         value = " ".join(reference.lower().replace(".", "").split())
-        aliases = {"ps ": "psalm ", "psalms ": "psalm ", "prov ": "proverbs ", "pr ": "proverbs ", "jn ": "john ", "rom ": "romans ", "phil ": "philippians ", "1 cor ": "1 corinthians ", "2 cor ": "2 corinthians ", "i corinthians ": "1 corinthians ", "ii corinthians ": "2 corinthians "}
+        aliases = {"ps ": "psalm ", "psalms ": "psalm ", "prov ": "proverbs ", "pr ": "proverbs ", "jn ": "john ", "rom ": "romans ", "phil ": "philippians ", "rev ": "revelation ", "1 cor ": "1 corinthians ", "2 cor ": "2 corinthians ", "i corinthians ": "1 corinthians ", "ii corinthians ": "2 corinthians "}
         for short, full in aliases.items():
             if value.startswith(short): return full + value[len(short):]
         return value
@@ -84,7 +84,7 @@ class CommandProcessor:
             if key in KJV_TOPICS:
                 key = self.choose(KJV_TOPICS[key])
             item = KJV.get(key)
-            if not item: return "That reference is not in my local KJV verse library yet."
+            if not item: return "That reference is not in my local KJV library."
             reference, text = item
         return f'“{text}”\n— {reference} KJV'
     def reply(self, text):
