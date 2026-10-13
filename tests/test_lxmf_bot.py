@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -140,6 +141,87 @@ class EchoBotTests(unittest.TestCase):
                 self.assertFalse(instance.allowed_sender(b"sender"))
                 self.assertEqual(instance.counters["rate_limited_count"], 1)
             finally: bot.CONFIG = old
+
+    def test_received_message_replies_to_attached_source_without_identity_recall(self):
+        class Source:
+            hash = b"remote-destination"
+        class Message:
+            source = Source()
+            source_hash = b"remote-destination"
+            def content_as_string(self): return "PING"
+        class Router:
+            def __init__(self): self.outbound = []
+            def handle_outbound(self, message): self.outbound.append(message)
+        class LXMessage:
+            DIRECT = "direct"
+            def __init__(self, destination, source, content, desired_method):
+                self.destination = destination; self.source = source; self.content = content; self.desired_method = desired_method
+        original_rns, original_lxmf = sys.modules.get("RNS"), sys.modules.get("LXMF")
+        sys.modules["RNS"] = types.SimpleNamespace(Identity=types.SimpleNamespace(recall=lambda _: (_ for _ in ()).throw(AssertionError("Identity.recall must not be used"))))
+        sys.modules["LXMF"] = types.SimpleNamespace(LXMessage=LXMessage)
+        try:
+            instance = bot.EchoBot()
+            instance.destination = types.SimpleNamespace(hash=b"bot-destination")
+            instance.router = Router()
+            instance.received(Message())
+            self.assertEqual(instance.counters["messages_received"], 1)
+            self.assertEqual(instance.counters["replies_sent"], 1)
+            self.assertIsNotNone(instance.counters["last_reply_sent"])
+            self.assertIsNone(instance.counters["last_reply_error"])
+            self.assertEqual(len(instance.router.outbound), 1)
+            outbound = instance.router.outbound[0]
+            self.assertIs(outbound.destination, Message.source)
+            self.assertEqual(outbound.content, "PONG")
+            self.assertEqual(outbound.desired_method, LXMessage.DIRECT)
+        finally:
+            if original_rns is None: sys.modules.pop("RNS", None)
+            else: sys.modules["RNS"] = original_rns
+            if original_lxmf is None: sys.modules.pop("LXMF", None)
+            else: sys.modules["LXMF"] = original_lxmf
+
+    def test_reply_destination_unavailable_is_observable(self):
+        class Message:
+            source_hash = b"remote-destination"
+            def content_as_string(self): return "PING"
+        instance = bot.EchoBot()
+        instance.destination = types.SimpleNamespace(hash=b"bot-destination")
+        instance.received(Message())
+        self.assertEqual(instance.counters["messages_received"], 1)
+        self.assertEqual(instance.counters["replies_sent"], 0)
+        self.assertEqual(instance.counters["last_reply_error"], "Reply destination unavailable")
+        self.assertEqual(instance.counters["activity"][0]["message"], "Reply destination unavailable")
+
+    def test_self_messages_and_rate_limited_messages_do_not_reply(self):
+        class Source:
+            hash = b"sender"
+        class Message:
+            source = Source()
+            source_hash = b"sender"
+            def content_as_string(self): return "PING"
+        class Router:
+            def __init__(self): self.outbound = []
+            def handle_outbound(self, message): self.outbound.append(message)
+        class LXMessage:
+            DIRECT = "direct"
+            def __init__(self, *args, **kwargs): pass
+        original_lxmf = sys.modules.get("LXMF")
+        sys.modules["LXMF"] = types.SimpleNamespace(LXMessage=LXMessage)
+        with tempfile.TemporaryDirectory() as root:
+            old = bot.CONFIG; bot.CONFIG = Path(root)
+            try:
+                (bot.CONFIG / "settings.json").parent.mkdir(parents=True, exist_ok=True)
+                (bot.CONFIG / "settings.json").write_text(json.dumps({"rate_limit_per_minute": 1}), encoding="utf-8")
+                instance = bot.EchoBot(); instance.destination = types.SimpleNamespace(hash=b"bot-destination"); instance.router = Router()
+                instance.received(Message()); instance.received(Message())
+                self.assertEqual(instance.counters["replies_sent"], 1)
+                self.assertEqual(instance.counters["rate_limited_count"], 1)
+                instance.destination = types.SimpleNamespace(hash=b"sender")
+                instance.received(Message())
+                self.assertEqual(instance.counters["replies_sent"], 1)
+            finally:
+                bot.CONFIG = old
+                if original_lxmf is None: sys.modules.pop("LXMF", None)
+                else: sys.modules["LXMF"] = original_lxmf
 
     def test_disabled_bot_does_not_process_or_reply(self):
         class Message:

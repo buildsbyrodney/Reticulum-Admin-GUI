@@ -121,7 +121,7 @@ class CommandProcessor:
 class EchoBot:
     def __init__(self):
         self.router = self.destination = None
-        self.counters = {"messages_received": 0, "replies_sent": 0, "command_count": 0, "rate_limited_count": 0, "last_command": None, "last_announce": None, "last_message_received": None, "last_reply_sent": None, "activity": []}
+        self.counters = {"messages_received": 0, "replies_sent": 0, "command_count": 0, "rate_limited_count": 0, "last_command": None, "last_announce": None, "last_message_received": None, "last_reply_sent": None, "last_reply_error": None, "activity": []}
         self.started_at = int(time.time()); self.sender_windows = {}; self.processor = CommandProcessor(self.safe_status)
     def activity(self, text):
         self.counters["activity"] = [{"at": int(time.time()), "message": text}] + self.counters["activity"][:19]
@@ -172,21 +172,28 @@ class EchoBot:
             self.sender_windows[key] = window; self.counters["rate_limited_count"] += 1; self.activity("Message rate limited"); return False
         window.append(now_time); self.sender_windows[key] = window; return True
     def received(self, message):
-        source_hash = getattr(message, "source_hash", None)
+        # LXMF attaches the sender's replyable outbound destination directly
+        # to received messages. Reconstructing it from an identity hash is
+        # both unnecessary and unreliable when that identity is not cached.
+        source_destination = getattr(message, "source", None)
+        source_hash = getattr(message, "source_hash", None) or getattr(source_destination, "hash", None)
         if not source_hash or (self.destination and source_hash == self.destination.hash) or not self.allowed_sender(source_hash): return
         if not read_settings()["enabled"]: return
         self.counters["messages_received"] += 1; self.counters["command_count"] += 1; self.counters["last_message_received"] = int(time.time()); self.activity("Message received")
         text = message.content_as_string() if hasattr(message, "content_as_string") else str(getattr(message, "content", ""))
         reply = self.processor.reply(text)[:MAX_REPLY]
         self.counters["last_command"] = (text or "").strip().split(maxsplit=1)[0].upper()[:24] or "TEXT"
+        if source_destination is None:
+            self.counters["last_reply_error"] = "Reply destination unavailable"
+            self.activity("Reply destination unavailable")
+            return
         try:
-            import RNS, LXMF
-            source = RNS.Identity.recall(source_hash)
-            if source is None: return
-            destination = RNS.Destination(source, RNS.Destination.OUT, RNS.Destination.SINGLE, "lxmf", "delivery")
-            outbound = LXMF.LXMessage(destination, self.destination, reply, desired_method=LXMF.LXMessage.DIRECT)
-            self.router.handle_outbound(outbound); self.counters["replies_sent"] += 1; self.counters["last_reply_sent"] = int(time.time()); self.activity("Reply sent")
-        except Exception as error: self.activity("Reply failed")
+            import LXMF
+            outbound = LXMF.LXMessage(source_destination, self.destination, reply, desired_method=LXMF.LXMessage.DIRECT)
+            self.router.handle_outbound(outbound); self.counters["replies_sent"] += 1; self.counters["last_reply_sent"] = int(time.time()); self.counters["last_reply_error"] = None; self.activity("Reply sent")
+        except Exception:
+            self.counters["last_reply_error"] = "Reply delivery failed"
+            self.activity("Reply delivery failed")
     def run(self):
         import RNS, LXMF
         STATE.mkdir(parents=True, exist_ok=True); CONFIG.mkdir(parents=True, exist_ok=True)
