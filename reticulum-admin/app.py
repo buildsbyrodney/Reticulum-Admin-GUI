@@ -597,11 +597,18 @@ def provisioning_summary(change, form):
         return {"kind": "auto"}
     return None
 
-def preview_provision_change(change, reason, warning=None):
+CONFIG_RETURN_ENDPOINTS = {"configuration", "interfaces", "discovery"}
+
+def config_return_endpoint(destination):
+    """Keep reviewed changes on a known in-app page; never redirect to form input."""
+    return destination if destination in CONFIG_RETURN_ENDPOINTS else "configuration"
+
+def preview_provision_change(change, reason, warning=None, return_destination="interfaces"):
     result = management("/config/preview", {"change":change}, timeout=float(os.environ.get("MANAGEMENT_PREVIEW_TIMEOUT", "5")))
     if not result.get("ok"): raise ValueError(result.get("error", "Configuration validation failed"))
     operation_id = f"CFG-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(3).upper()}"
-    session["config_change"] = {"change":change, "reason":reason[:240], "operation_id":operation_id}
+    session["config_change"] = {"change":change, "reason":reason[:240], "operation_id":operation_id,
+                                "return_destination":config_return_endpoint(return_destination)}
     return result, warning
 
 def display_config_value(value, secret_value=False):
@@ -729,7 +736,8 @@ def interface_edit(name):
         change = {"kind": "interface", "name": name, "changes": changes}
         result = local_config_preview(change)
         operation_id = f"CFG-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(3).upper()}"
-        session["config_change"] = {"change": change, "reason": request.form.get("reason", f"Update {name}")[:240], "operation_id": operation_id}
+        session["config_change"] = {"change": change, "reason": request.form.get("reason", f"Update {name}")[:240], "operation_id": operation_id,
+                                    "return_destination": "interfaces"}
         return render_template("configuration_preview.html", title="Review Interface Change", preview=result, change=change)
     return render_template("interface_edit.html", title=f"Edit Interface: {name}", interface=row, modes=MODE_HELP, discovery=discovery_capabilities())
 
@@ -742,7 +750,7 @@ def interface_add():
             change = make_interface_change(request.form)
             preview, warning = preview_provision_change(change, request.form.get("reason", "Add interface"), "Creating a TCP Server does not automatically make it Internet reachable; firewall, NAT, or router configuration may still be required." if change["interface"]["type"] == "TCPServerInterface" else None)
         except ValueError as error:
-            flash(str(error), "error"); return redirect(url_for("interface_add", purpose=request.form.get("purpose", "manual")))
+            flash(str(error), "error"); return redirect(url_for("interfaces"))
         return render_template("configuration_preview.html", title="Review New Interface", preview=preview, change=change, warning=warning, setup_summary=provisioning_summary(change, request.form))
     purpose = request.args.get("purpose", "user_tcp")
     return render_template("interface_form.html", title="Add Interface", presets=PRESETS, selected=purpose, values=PRESETS.get(purpose, {}), modes=MODE_HELP, clone=False)
@@ -760,7 +768,7 @@ def interface_clone(name):
             change = make_interface_change(request.form)
             preview, warning = preview_provision_change(change, request.form.get("reason", f"Clone {name}"), "A cloned TCP server must use a different port from its source.")
         except ValueError as error:
-            flash(str(error), "error"); return redirect(url_for("interface_clone", name=name))
+            flash(str(error), "error"); return redirect(url_for("interfaces"))
         return render_template("configuration_preview.html", title="Review Interface Clone", preview=preview, change=change, warning=warning)
     values = {"type":source.get("type"), "name":f"{name} Copy", "mode":source.get("mode") or "full", **(source.get("fields") or {})}
     if source.get("type") == "TCPServerInterface": values["listen_port"] = ""
@@ -806,7 +814,8 @@ def discovery():
             flash(str(error), "error")
             return redirect(url_for("discovery"))
         operation_id = f"CFG-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(3).upper()}"
-        session["config_change"] = {"change": change, "reason": request.form.get("reason", "Update discovery settings")[:240], "operation_id": operation_id, "return_to": url_for("discovery")}
+        session["config_change"] = {"change": change, "reason": request.form.get("reason", "Update discovery settings")[:240], "operation_id": operation_id,
+                                    "return_destination": "discovery"}
         return render_template("configuration_preview.html", title="Review Discovery Settings", preview=preview, change=change,
                                warning="Discovery and auto-connect can change how this node learns about remote interfaces. No discovered interface will be connected automatically unless you explicitly set a non-zero auto-connect limit.")
     snap, observed, _ = ingest_snapshot()
@@ -1090,7 +1099,8 @@ def configuration_preview():
     # config immediately before it writes anything in configuration_apply().
     result = local_config_preview(change)
     operation_id = f"CFG-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(3).upper()}"
-    session["config_change"]={"change":change,"reason":request.form.get("reason", "Configuration change")[:240], "operation_id":operation_id}
+    session["config_change"]={"change":change,"reason":request.form.get("reason", "Configuration change")[:240], "operation_id":operation_id,
+                              "return_destination":"configuration"}
     return render_template("configuration_preview.html", title="Review Configuration Change", preview=result, change=change)
 
 @app.post("/configuration/apply")
@@ -1115,7 +1125,7 @@ def configuration_apply():
         # operator-actionable and must not be disguised as recovery trouble.
         message, category = result.get("error") or "Configuration failed; recovery needs attention.", "error"
     flash(message, category)
-    return redirect(item.get("return_to") or url_for("configuration"))
+    return redirect(url_for(config_return_endpoint(item.get("return_destination"))))
 
 @app.route("/snapshots", methods=["GET", "POST"])
 @login_required

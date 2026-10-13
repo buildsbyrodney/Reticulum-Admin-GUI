@@ -250,6 +250,49 @@ class LiveRnstatusTests(unittest.TestCase):
         self.assertEqual(row["result"], "Result Unknown / Verification Timed Out")
         self.assertEqual(row["operation_id"], "CFG-20261010-051834-A1B2C3")
 
+    def test_review_apply_returns_to_interfaces_and_discovery(self):
+        client = self.client()
+        original = self.app_module.management
+        self.app_module.management = lambda path, body=None: {"ok": True}
+        try:
+            review = client.post("/interfaces/Default%20Interface/edit", data={
+                "csrf_token": "test-csrf", "enabled": "yes", "mode": "full", "reason": "test",
+            })
+            self.assertEqual(review.status_code, 200)
+            applied = client.post("/configuration/apply", data={"csrf_token": "test-csrf"}, follow_redirects=False)
+            self.assertEqual(applied.headers["Location"], "/interfaces")
+
+            review = client.post("/discovery", data={
+                "csrf_token": "test-csrf", "discover_interfaces": "yes",
+                "autoconnect_discovered_interfaces": "0", "autoconnect_unverified_implementations": "no",
+            })
+            self.assertEqual(review.status_code, 200)
+            applied = client.post("/configuration/apply", data={"csrf_token": "test-csrf"}, follow_redirects=False)
+            self.assertEqual(applied.headers["Location"], "/discovery")
+
+            review = client.post("/configuration/preview", data={
+                "csrf_token": "test-csrf", "kind": "global", "setting": "enable_transport", "value": "on",
+            })
+            self.assertEqual(review.status_code, 200)
+            applied = client.post("/configuration/apply", data={"csrf_token": "test-csrf"}, follow_redirects=False)
+            self.assertEqual(applied.headers["Location"], "/configuration")
+        finally:
+            self.app_module.management = original
+
+    def test_invalid_configuration_return_destination_falls_back_to_configuration(self):
+        client = self.client()
+        original = self.app_module.management
+        self.app_module.management = lambda path, body=None: {"ok": False, "error": "Rejected"}
+        try:
+            with client.session_transaction() as session:
+                session["config_change"] = {"operation_id": "CFG-test", "reason": "test",
+                                            "change": {"kind": "global", "setting": "enable_transport", "value": True},
+                                            "return_destination": "https://untrusted.example"}
+            response = client.post("/configuration/apply", data={"csrf_token": "test-csrf"}, follow_redirects=False)
+        finally:
+            self.app_module.management = original
+        self.assertEqual(response.headers["Location"], "/configuration")
+
     def test_runtime_tcp_child_becomes_connected_client_and_history(self):
         """rns 1.5.7 exposes inbound peers as child interfaces, not clients[]."""
         status = json.loads(TCP_CHILD_FIXTURE.read_text())
