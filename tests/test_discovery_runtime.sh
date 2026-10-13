@@ -110,7 +110,7 @@ fi
 messaging_destination_after=$(python3 -c "import json; print(json.load(open('$messaging_state/status.json'))['destination'])")
 test "$messaging_destination_before" = "$messaging_destination_after"
 printf '%s' '{"id":"outbound-test","destination":"0123456789abcdef0123456789abcdef","body":"actual image outbound persistence"}' > "$messaging_requests/outbound-outbound-test.json"
-if ! wait_for 10 python3 -c "import sqlite3; row=sqlite3.connect('$messaging_state/messages.db').execute(\"select body,conversation_key,delivery_state from messages where id='outbound-test'\").fetchone(); assert row and row[0] == 'actual image outbound persistence' and row[1] == '0123456789abcdef0123456789abcdef' and row[2] in ('Sent','Failed')"; then
+if ! wait_for 10 python3 -c "import os, sqlite3; row=sqlite3.connect('$messaging_state/messages.db').execute(\"select body,conversation_key,delivery_state from messages where id='outbound-test'\").fetchone(); assert row and row[0] == 'actual image outbound persistence' and row[1] == '0123456789abcdef0123456789abcdef' and row[2] in ('Queued','Delivered','Failed') and not os.path.exists('$messaging_requests/outbound-outbound-test.json')"; then
   docker logs "$messaging_container" >&2 || true
   echo "Messaging service did not persist queued outbound message" >&2
   exit 1

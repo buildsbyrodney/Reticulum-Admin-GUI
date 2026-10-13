@@ -34,7 +34,7 @@ class MessagingServiceTests(unittest.TestCase):
             self.assertIsNotNone(con.execute("SELECT read_at FROM messages WHERE id='m'").fetchone()[0]); self.assertEqual(con.execute("SELECT name FROM contacts").fetchone()[0], "Alice")
         messaging.atomic_json(messaging.REQUESTS / "contact-delete-test.json", {"destination": key}); service.process_requests()
         with messaging.connect() as con: self.assertIsNone(con.execute("SELECT * FROM contacts").fetchone())
-    def test_outbound_request_creates_one_persistent_failed_row(self):
+    def test_outbound_request_is_persisted_before_request_is_deleted_and_replay_is_idempotent(self):
         service = messaging.Messaging(); service.destination = types.SimpleNamespace(hash=b"operator"); service.router = types.SimpleNamespace(handle_outbound=lambda _: None)
         target = "c" * 32
         messaging.atomic_json(messaging.REQUESTS / "outbound-out.json", {"id": "out", "destination": target, "body": "hello"})
@@ -43,6 +43,7 @@ class MessagingServiceTests(unittest.TestCase):
             row = con.execute("SELECT * FROM messages WHERE id='out'").fetchone()
             self.assertEqual(con.execute("SELECT count(*) FROM messages WHERE id='out'").fetchone()[0], 1)
         self.assertEqual(row["conversation_key"], target); self.assertEqual(row["recipient_destination"], target); self.assertEqual(row["body"], "hello"); self.assertEqual(row["delivery_state"], "Failed")
+        self.assertFalse((messaging.REQUESTS / "outbound-out.json").exists())
         service.send({"id": "out", "destination": target, "body": "hello"})
         with messaging.connect() as con: self.assertEqual(con.execute("SELECT count(*) FROM messages WHERE id='out'").fetchone()[0], 1)
 
@@ -63,16 +64,60 @@ class MessagingServiceTests(unittest.TestCase):
             def __init__(self, *args): self.args = args
         class LXMessage:
             DIRECT = "direct"
-            def __init__(self, *args, **kwargs): pass
+            def __init__(self, *args, **kwargs): self.delivered = self.failed = None
+            def register_delivery_callback(self, callback): self.delivered = callback
+            def register_failed_callback(self, callback): self.failed = callback
         old_rns, old_lxmf, old_wait = sys.modules.get("RNS"), sys.modules.get("LXMF"), messaging.PATH_LOOKUP_SECONDS
         sys.modules["RNS"] = types.SimpleNamespace(Identity=Identity, Transport=Transport, Destination=Destination); sys.modules["LXMF"] = types.SimpleNamespace(LXMessage=LXMessage); messaging.PATH_LOOKUP_SECONDS = 1
         try:
             service = messaging.Messaging(); service.destination = types.SimpleNamespace(hash=b"operator"); service.router = types.SimpleNamespace(handle_outbound=lambda item: sent.append(item))
             service.send({"id": "known", "destination": target, "body": "hello"})
-            with messaging.connect() as con: self.assertEqual(con.execute("SELECT delivery_state FROM messages WHERE id='known'").fetchone()[0], "Sent")
+            with messaging.connect() as con: self.assertEqual(con.execute("SELECT delivery_state FROM messages WHERE id='known'").fetchone()[0], "Queued")
             self.assertEqual(len(sent), 1); self.assertEqual(Transport.requested, [bytes.fromhex(target)])
+            # Simulate a crash after the durable insert but before the worker
+            # could unlink its request file. Replay removes the request but
+            # must not create a second row or submit a second LXMF message.
+            replay = messaging.REQUESTS / "outbound-known-replay.json"
+            messaging.atomic_json(replay, {"id": "known", "destination": target, "body": "hello"})
+            service.process_requests()
+            self.assertFalse(replay.exists()); self.assertEqual(len(sent), 1)
+            with messaging.connect() as con: self.assertEqual(con.execute("SELECT count(*) FROM messages WHERE id='known'").fetchone()[0], 1)
+            sent[0].delivered(sent[0])
+            with messaging.connect() as con: self.assertEqual(con.execute("SELECT delivery_state FROM messages WHERE id='known'").fetchone()[0], "Delivered")
         finally:
             messaging.PATH_LOOKUP_SECONDS = old_wait
+            if old_rns is None: sys.modules.pop("RNS", None)
+            else: sys.modules["RNS"] = old_rns
+            if old_lxmf is None: sys.modules.pop("LXMF", None)
+            else: sys.modules["LXMF"] = old_lxmf
+
+    def test_delivery_and_failure_callbacks_update_the_correct_persistent_row(self):
+        target = "a" * 32; submitted = []
+        class Identity:
+            @staticmethod
+            def recall(_): return object()
+        class Destination:
+            OUT = SINGLE = 1
+            def __init__(self, *args): pass
+        class LXMessage:
+            DIRECT = "direct"
+            def __init__(self, *args, **kwargs): self.delivery = self.failed = None
+            def register_delivery_callback(self, callback): self.delivery = callback
+            def register_failed_callback(self, callback): self.failed = callback
+        old_rns, old_lxmf = sys.modules.get("RNS"), sys.modules.get("LXMF")
+        sys.modules["RNS"] = types.SimpleNamespace(Identity=Identity, Transport=types.SimpleNamespace(request_path=lambda _: None), Destination=Destination)
+        sys.modules["LXMF"] = types.SimpleNamespace(LXMessage=LXMessage)
+        try:
+            service = messaging.Messaging(); service.destination = types.SimpleNamespace(hash=b"operator"); service.router = types.SimpleNamespace(handle_outbound=lambda item: submitted.append(item))
+            service.send({"id": "delivery", "destination": target, "body": "first"})
+            service.send({"id": "failure", "destination": target, "body": "second"})
+            submitted[0].delivery(submitted[0]); submitted[1].failed(submitted[1])
+            with messaging.connect() as con:
+                self.assertEqual(con.execute("SELECT delivery_state FROM messages WHERE id='delivery'").fetchone()[0], "Delivered")
+                failure = con.execute("SELECT delivery_state,error FROM messages WHERE id='failure'").fetchone()
+            self.assertEqual(failure["delivery_state"], "Failed"); self.assertIn("LXMF delivery failed", failure["error"])
+            self.assertIsNotNone(service.state["last_message_sent"])
+        finally:
             if old_rns is None: sys.modules.pop("RNS", None)
             else: sys.modules["RNS"] = old_rns
             if old_lxmf is None: sys.modules.pop("LXMF", None)
@@ -106,6 +151,31 @@ class MessagingServiceTests(unittest.TestCase):
             self.assertEqual(row["delivery_state"], "Failed"); self.assertIn("route", row["error"].lower()); self.assertEqual(Transport.requested, [bytes.fromhex(target)])
         finally:
             messaging.PATH_LOOKUP_SECONDS = old_wait
+            if old_rns is None: sys.modules.pop("RNS", None)
+            else: sys.modules["RNS"] = old_rns
+            if old_lxmf is None: sys.modules.pop("LXMF", None)
+            else: sys.modules["LXMF"] = old_lxmf
+
+    def test_lxmf_submission_failure_is_not_reported_as_a_route_timeout(self):
+        target = "f" * 32
+        class Identity:
+            @staticmethod
+            def recall(_): return object()
+        class Destination:
+            OUT = SINGLE = 1
+            def __init__(self, *args): pass
+        class LXMessage:
+            DIRECT = "direct"
+            def __init__(self, *args, **kwargs): raise RuntimeError("not shown to the operator")
+        old_rns, old_lxmf = sys.modules.get("RNS"), sys.modules.get("LXMF")
+        sys.modules["RNS"] = types.SimpleNamespace(Identity=Identity, Transport=types.SimpleNamespace(request_path=lambda _: None), Destination=Destination)
+        sys.modules["LXMF"] = types.SimpleNamespace(LXMessage=LXMessage)
+        try:
+            service = messaging.Messaging(); service.destination = types.SimpleNamespace(hash=b"operator"); service.router = types.SimpleNamespace(handle_outbound=lambda _: None)
+            service.send({"id": "submission", "destination": target, "body": "hello"})
+            with messaging.connect() as con: row = con.execute("SELECT delivery_state,error FROM messages WHERE id='submission'").fetchone()
+            self.assertEqual(row["delivery_state"], "Failed"); self.assertEqual(row["error"], "LXMF submission failed.")
+        finally:
             if old_rns is None: sys.modules.pop("RNS", None)
             else: sys.modules["RNS"] = old_rns
             if old_lxmf is None: sys.modules.pop("LXMF", None)
