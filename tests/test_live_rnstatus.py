@@ -129,6 +129,38 @@ class LiveRnstatusTests(unittest.TestCase):
         self.assertEqual(blocked_delete.status_code, 200)
         self.assertIn(b"managed internally by Reticulum", blocked_delete.data)
 
+    def test_interface_edit_handles_configured_and_detached_interfaces_without_runtime_traffic(self):
+        """Editing a configured interface must not require a live rnstatus row."""
+        status_path = self.app_module.RETICULUM_DIR / "admin-status" / "snapshot.json"
+        original_snapshot = status_path.read_text(encoding="utf-8")
+        original_config = self.app_module.CONFIG_VIEW_CACHE["config"]
+        try:
+            self.app_module.CONFIG_VIEW_CACHE["config"] = {
+                "global": {"enable_transport": "No", "loglevel": "4"},
+                "interfaces": [
+                    {"name": "Default Interface", "type": "AutoInterface", "enabled": "Yes", "mode": "full", "fields": {}},
+                    {"name": "Trusted Upstream", "type": "TCPClientInterface", "enabled": "No", "mode": "full", "fields": {"target_host": "example.invalid", "target_port": "4242"}},
+                ],
+            }
+            status_path.write_text(json.dumps({"status": {"interfaces": []}, "paths": []}), encoding="utf-8")
+            client = self.client()
+            for route in ("/interfaces/Default%20Interface/edit", "/interfaces/Trusted%20Upstream/edit"):
+                response = client.get(route)
+                self.assertEqual(response.status_code, 200, route)
+                self.assertIn("Traffic: — / —", response.get_data(as_text=True))
+                self.assertIn("Detached / unavailable", response.get_data(as_text=True))
+        finally:
+            status_path.write_text(original_snapshot, encoding="utf-8")
+            self.app_module.CONFIG_VIEW_CACHE["config"] = original_config
+
+    def test_format_bytes_is_safe_for_unavailable_values_and_formats_numeric_traffic(self):
+        from jinja2 import Undefined
+
+        for value in (None, Undefined(name="rx_bytes"), "", "   ", "not-a-number", object(), True):
+            self.assertEqual(self.app_module.format_bytes(value), "—")
+        self.assertEqual(self.app_module.format_bytes(0), "0 B")
+        self.assertEqual(self.app_module.format_bytes("1536"), "1.5 KiB")
+
     def test_tcp_and_tailscale_guidance_is_visible_without_network_automation(self):
         client = self.client()
         form = client.get("/interfaces/add?purpose=user_tcp").get_data(as_text=True)
