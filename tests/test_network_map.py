@@ -63,8 +63,22 @@ class NetworkMapTests(unittest.TestCase):
         css = (Path(__file__).parents[1] / "reticulum-admin" / "static" / "app.css").read_text(encoding="utf-8")
         self.assertIn("window.location.assign(node.route)", template)
         self.assertIn("window.setTimeout(refresh,5000)", template)
+        self.assertIn("settleFrames<180", template)
+        self.assertIn("function startSettling", template)
+        self.assertNotIn("function tick()", template)
         self.assertIn("@media (max-width: 700px)", css)
         self.assertNotIn("blackhole", template.lower())
+
+    def test_mobile_navigation_is_accessible_and_progressively_enhanced(self):
+        root = Path(__file__).parents[1]
+        base = (root / "reticulum-admin" / "templates" / "base.html").read_text(encoding="utf-8")
+        css = (root / "reticulum-admin" / "static" / "app.css").read_text(encoding="utf-8")
+        self.assertIn('aria-controls="primary-navigation"', base)
+        self.assertIn('aria-expanded="false"', base)
+        self.assertIn('document.documentElement.classList.add("nav-ready")', base)
+        self.assertIn('event.target.closest("a")', base)
+        self.assertIn('.nav-ready .site-header nav { display: none; }', css)
+        self.assertIn('.nav-ready .site-header nav.open { display: flex;', css)
 
 
 if __name__ == "__main__":
