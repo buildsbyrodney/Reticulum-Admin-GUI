@@ -260,3 +260,9 @@ The Interfaces page can create, clone, or delete TCP Server, TCP Client, and Aut
 The recommended starting pattern is Public TCP → Boundary, Local/RF → Internal, and Trusted Backbone → Full. It is a useful pattern, not a rule. Use separate IFAC credentials for ordinary user access and trusted backbone links. A TCP Server does not automatically become reachable from the Internet: firewall, NAT, and router configuration remain under the operator's control.
 
 For a physical Pi test: create a manual snapshot, add a TCP Server on an unused port, review/apply and verify `rnstatus`, connect a test client, clone it to a different port, delete the clone, add and disable/re-enable a TCP Client, then restore the original snapshot and reboot. Also exercise duplicate name, duplicate port, invalid port, blank TCP target, invalid IFAC size, and a forced-health-failure test mode without modifying production state.
+
+## Network Map
+
+Network Map is a read-only, local-observation graph. It draws the managed shared instance, interfaces, proven inbound TCP clients, local Bot and Messaging identities, known Reticulum paths, and LXMF delivery peers observed by Messaging. Selecting a node shows the exact local fields behind it; double-clicking only opens a relevant existing Admin page when the relationship is clear.
+
+It is intentionally conservative: a destination hash or public LXMF display name is not proof of a person, a physical device, or a verified Reticulum identity. The map does not infer Nomad nodes, route controls, or remote topology that the managed runtime has not explicitly exposed. Announced peers are passive observations, and their hop count is shown as unavailable when the most recent announce did not provide a reliable value.

@@ -5,6 +5,7 @@ import secrets
 import sqlite3
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 import socket
 import platform
@@ -407,6 +408,111 @@ def path_models(raw_paths, known, query=""):
                      "destination_label": destination_label, "transport_label": transport_label,
                      "identity_label": identity_label, "hash_type": "Destination", "identity_relationship": "Verified" if identity else "Unknown"})
     return rows
+
+def network_map_model():
+    """Build a conservative, read-only graph from data the UI already has.
+
+    An edge only means the local application observed the stated relationship.
+    In particular, destination hashes and announce names are *not* promoted to
+    verified Reticulum identities merely because they look like one.
+    """
+    snap, observed, clients = ingest_snapshot()
+    configured, runtime_only = merge_interface_models(configuration_model().get("interfaces", []), observed)
+    interfaces = configured + runtime_only
+    known = labels()
+    nodes, edges, by_destination = [], [], {}
+
+    def add_node(node):
+        nodes.append(node); return node
+    def add_edge(source, target, edge_type, detail):
+        edges.append({"id": f"{source}|{target}|{edge_type}", "source": source,
+                      "target": target, "type": edge_type, "detail": detail})
+    def destination_node(destination, *, name=None, details=None):
+        if not valid_destination(destination):
+            return None
+        node = by_destination.get(destination)
+        if node:
+            if name and node["name"] == short_destination(destination): node["name"] = name
+            if details: node["details"].update({k:v for k,v in details.items() if v is not None})
+            return node
+        label = known.get(("destination", destination), {}).get("label")
+        node = add_node({"id": "peer:" + destination, "class": "peer_identity",
+                         "name": label or name or short_destination(destination),
+                         "subtitle": "Known destination; identity relationship unknown",
+                         "details": {"Destination hash": destination, "Node class": "Known peer destination", "Identity": "Unknown / not inferred", **(details or {})},
+                         "route": "/paths?q=" + destination})
+        by_destination[destination] = node
+        return node
+
+    local_id = "local:shared-instance"
+    add_node({"id": local_id, "class": "local_instance", "name": "Managed Reticulum instance",
+              "subtitle": "Shared instance" if snap.get("running") else "Runtime status unavailable",
+              "details": {"Node class": "Local shared instance", "Runtime": "Up" if snap.get("running") else "Unavailable",
+                          "Transport": "On" if transport_enabled() else "Off", "Known paths": len(snap.get("paths") or [])}, "route": None})
+
+    interface_ids = {}
+    for item in interfaces:
+        name = str(item.get("name") or "Unnamed interface")
+        identifier = "interface:" + name
+        interface_ids[name] = identifier
+        state = item.get("status_display") or "Runtime unavailable"
+        add_node({"id": identifier, "class": "local_interface", "name": name,
+                  "subtitle": f"{item.get('type') or 'Unknown interface'} · {state}",
+                  "details": {"Node class": "Local interface", "Interface type": item.get("type") or "Unknown",
+                              "Runtime state": state, "Mode": item.get("mode_display") or item.get("mode") or "Unknown",
+                              "Configured": "Yes" if item.get("configured") else "Runtime only",
+                              "IFAC network": item.get("ifac_netname") or item.get("fields", {}).get("network_name") or "Unknown",
+                              "Reported clients": item.get("client_count") if item.get("client_count") is not None else "Unavailable"},
+                  "route": "/interfaces/" + urllib.parse.quote(name, safe="")})
+        add_edge(local_id, identifier, "local_interface", "Runtime interface attached to this shared instance")
+
+    for client in clients:
+        parent = interface_ids.get(client.get("interface"))
+        if not parent: continue
+        cid = "client:" + client["key"]
+        endpoint = f"{client['remote_ip']}:{client['remote_port']}"
+        add_node({"id": cid, "class": "connected_client", "name": endpoint,
+                  "subtitle": "Direct TCP client; Reticulum identity not correlated",
+                  "details": {"Node class": "Connected TCP client", "Remote endpoint": endpoint,
+                              "Parent interface": client.get("interface") or "Unknown", "Status": client.get("status") or "Unknown",
+                              "RX bytes": client.get("rx") if client.get("rx") is not None else "Unavailable",
+                              "TX bytes": client.get("tx") if client.get("tx") is not None else "Unavailable",
+                              "Identity correlation": "Unknown / not inferred"},
+                  "route": "/clients?interface=" + urllib.parse.quote(str(client.get("interface") or ""), safe="")})
+        add_edge(parent, cid, "tcp_client", "Runtime TCP child attached to this server")
+
+    bot = bot_status(); messaging = messaging_status()
+    for service_name, status, route, title in (("bot", bot, "/diagnostics/bot", "Test Echo Bot"),
+                                                ("messaging", messaging, "/messaging/identity", "Messaging identity")):
+        destination = status.get("destination")
+        sid = "service:" + service_name
+        add_node({"id": sid, "class": "service_identity", "name": status.get("display_name") or title,
+                  "subtitle": title + (" · Running" if status.get("running") else " · Unavailable"),
+                  "details": {"Node class": "Local service identity", "Service": title,
+                              "Status": "Running" if status.get("running") else "Unavailable",
+                              "Destination hash": destination or "Not ready yet",
+                              "Shared instance": "Connected" if status.get("shared_instance_connected") else "Unavailable"}, "route": route})
+        add_edge(local_id, sid, "local_service", "Local service attached to the managed shared instance")
+
+    for path in path_models(snap.get("paths") or [], known):
+        peer = destination_node(path.get("destination"), details={"Hops": path.get("hops") if path.get("hops") is not None else "Unavailable",
+                                                                    "Via transport": path.get("transport") or "Unknown",
+                                                                    "Interface": path.get("interface") or "Unknown"})
+        if peer: add_edge(local_id, peer["id"], "known_path", "Known Reticulum path; not a verified identity relationship")
+
+    for peer in messaging_announced_peers():
+        destination = peer.get("destination_hash")
+        peer_node = destination_node(destination, name=peer.get("contact_name") or peer.get("display_name") or peer.get("message_display_name"),
+                                     details={"First seen": format_time(peer.get("first_seen")), "Last seen": format_time(peer.get("last_seen")),
+                                              "Announce count": peer.get("announce_count") or 0,
+                                              "Hops": "Hops unavailable" if peer.get("last_hops") is None else peer.get("last_hops"),
+                                              "Announced display name": peer.get("display_name") or peer.get("message_display_name") or "Unknown"})
+        if peer_node:
+            peer_node["route"] = "/messaging/conversations/" + destination + "?tab=announces"
+            add_edge("service:messaging", peer_node["id"], "lxmf_announce", "Passive LXMF delivery announce observed by Messaging")
+
+    return {"nodes": nodes, "edges": edges, "generated_at": now(),
+            "limitations": "The map shows local observations only. Announced names and destination hashes are informational; they do not prove a Reticulum identity or physical device."}
 
 def hash_context(value, path_rows, known):
     """Report every context actually observed. Hash length is deliberately never a classifier."""
@@ -884,13 +990,13 @@ def interface_delete(name):
 @app.get("/topology")
 @login_required
 def topology():
-    snap, observed, _ = ingest_snapshot(); rows, _ = merge_interface_models(configuration_model().get("interfaces", []), observed)
-    warnings=[]; modes={str(item.get("mode", "")).lower() for item in rows}
-    if "full" in modes and "internal" in modes: warnings.append("A Full interface and an Internal interface are both configured. Review announce propagation for this topology.")
-    if transport_enabled() and any(item.get("type") == "TCPServerInterface" and str(item.get("mode", "")).lower() == "full" for item in rows): warnings.append("Transport Mode is enabled while a Full TCP Server interface is configured. Confirm this node is intended to route for other peers.")
-    for item in rows:
-        if item.get("type") == "TCPServerInterface" and not item.get("fields", {}).get("passphrase"): warnings.append(f"IFAC is disabled on TCP Server interface {item.get('name')}.")
-    return render_template("topology.html", title="Topology", rows=rows, warnings=warnings, discovered=discovered_interface_models(snap, observed))
+    return render_template("topology.html", title="Network Map", graph=network_map_model())
+
+@app.get("/topology/api/graph")
+@login_required
+def topology_graph_api():
+    """Narrow, authenticated observation endpoint. It never changes runtime state."""
+    return jsonify(network_map_model())
 
 @app.route("/discovery", methods=["GET", "POST"])
 @login_required
