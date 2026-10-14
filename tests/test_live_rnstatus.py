@@ -474,6 +474,11 @@ class LiveRnstatusTests(unittest.TestCase):
         self.assertIn("High concentration", " ".join(module.path_health_summary(concentrated)["warnings"]))
         self.assertNotIn("High concentration", " ".join(module.path_health_summary(concentrated[:99])["warnings"]))
 
+        unavailable = [{"hash": f"{index:032x}", "hops": 2, "interface": "Unknown"} for index in range(4000)]
+        unavailable_health = module.path_health_summary(unavailable)
+        self.assertEqual((len(unavailable_health["groups"]), unavailable_health["groups"][0]["transport"], unavailable_health["groups"][0]["count"]), (1, "", 4000))
+        self.assertNotIn("High concentration", " ".join(unavailable_health["warnings"]))
+
     def test_grouped_paths_page_and_recovery_prefill_are_read_only_until_reviewed(self):
         module = self.app_module
         via = "b" * 32
@@ -492,6 +497,12 @@ class LiveRnstatusTests(unittest.TestCase):
             self.assertIn(f'value="{via}"', recovery)
             self.assertIn('name="drop_via" checked', recovery)
             self.assertNotIn("/execute", calls)
+
+            module.ingest_snapshot = lambda: ({"paths": [{"hash": f"{index:032x}", "hops": 2} for index in range(4000)], "path_error": None}, [], [])
+            unavailable_recovery = self.client().get("/recovery").get_data(as_text=True)
+            self.assertIn("Unavailable", unavailable_recovery)
+            self.assertNotIn("High concentration of learned paths through one transport", unavailable_recovery)
+            self.assertNotIn("transport=", unavailable_recovery)
         finally:
             module.ingest_snapshot, module.management = original_ingest, original_management
 

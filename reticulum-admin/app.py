@@ -497,7 +497,7 @@ def path_health_summary(raw_paths, known=None):
         warnings.append("High path count: 1,000 or more paths are currently known.")
     elif grouped["total"] >= PATH_ELEVATED_COUNT:
         warnings.append("Elevated path count: 100 or more paths are currently known.")
-    if top and top["count"] >= PATH_CONCENTRATION_MIN_COUNT and top["share"] >= PATH_CONCENTRATION_SHARE:
+    if top and valid_destination(top["transport"]) and top["count"] >= PATH_CONCENTRATION_MIN_COUNT and top["share"] >= PATH_CONCENTRATION_SHARE:
         warnings.append("High concentration of learned paths through one transport.")
     return {**grouped, "top": top, "warnings": warnings,
             "thresholds": {"elevated": PATH_ELEVATED_COUNT, "concentration_count": PATH_CONCENTRATION_MIN_COUNT,
