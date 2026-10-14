@@ -420,6 +420,11 @@ def network_map_model():
     configured, runtime_only = merge_interface_models(configuration_model().get("interfaces", []), observed)
     interfaces = configured + runtime_only
     known = labels()
+    # Destination hashes are the only join key here.  This deliberately leaves
+    # room for future documented announce aspects (such as nomadnetwork.node
+    # or lxmf.propagation) to enrich the same node without changing its ID.
+    announced = {str(row.get("destination_hash")): row for row in messaging_announced_peers()
+                 if valid_destination(str(row.get("destination_hash") or ""))}
     nodes, edges, by_destination = [], [], {}
 
     def add_node(node):
@@ -430,16 +435,23 @@ def network_map_model():
     def destination_node(destination, *, name=None, details=None):
         if not valid_destination(destination):
             return None
+        announce = announced.get(destination, {})
+        # Contact labels are intentionally local presentation choices. Public
+        # announce and received-message names remain informational only.
+        presentation_name = (announce.get("contact_name") or announce.get("display_name") or
+                             announce.get("message_display_name") or name or short_destination(destination))
         node = by_destination.get(destination)
         if node:
-            if name and node["name"] == short_destination(destination): node["name"] = name
+            node["name"] = presentation_name
+            node["subtitle"] = short_destination(destination)
             if details: node["details"].update({k:v for k,v in details.items() if v is not None})
             return node
-        label = known.get(("destination", destination), {}).get("label")
         node = add_node({"id": "peer:" + destination, "class": "peer_identity",
-                         "name": label or name or short_destination(destination),
-                         "subtitle": "Known destination; identity relationship unknown",
-                         "details": {"Destination hash": destination, "Node class": "Known peer destination", "Identity": "Unknown / not inferred", **(details or {})},
+                         "name": presentation_name, "subtitle": short_destination(destination),
+                         "details": {"Destination hash": destination, "Node class": "Known peer destination",
+                                     "Identity": "Unknown / not inferred",
+                                     "Presentation source": "Saved Contact" if announce.get("contact_name") else ("Observed LXMF announce" if announce.get("display_name") else ("Received LXMF message" if announce.get("message_display_name") else "Destination hash")),
+                                     **(details or {})},
                          "route": "/paths?q=" + destination})
         by_destination[destination] = node
         return node
@@ -500,7 +512,7 @@ def network_map_model():
                                                                     "Interface": path.get("interface") or "Unknown"})
         if peer: add_edge(local_id, peer["id"], "known_path", "Known Reticulum path; not a verified identity relationship")
 
-    for peer in messaging_announced_peers():
+    for peer in announced.values():
         destination = peer.get("destination_hash")
         peer_node = destination_node(destination, name=peer.get("contact_name") or peer.get("display_name") or peer.get("message_display_name"),
                                      details={"First seen": format_time(peer.get("first_seen")), "Last seen": format_time(peer.get("last_seen")),

@@ -47,6 +47,29 @@ class NetworkMapTests(unittest.TestCase):
         self.assertTrue(any(edge["type"] == "tcp_client" for edge in graph["edges"]))
         self.assertTrue(any(edge["type"] == "lxmf_announce" for edge in graph["edges"]))
 
+    def test_exact_path_and_announce_hashes_merge_with_name_and_path_details(self):
+        destination, unrelated = "f" * 32, "9" * 32
+        self.web.ingest_snapshot = lambda: ({"running": True, "paths": [
+            {"hash": destination, "hops": 3, "via": "a" * 32, "interface": "LAN"},
+            {"hash": unrelated, "hops": 1, "via": "b" * 32, "interface": "LAN"},
+        ]}, [], [])
+        self.web.configuration_model = lambda: {"interfaces": []}
+        self.web.messaging_announced_peers = lambda: [{"destination_hash": destination,
+            "contact_name": None, "display_name": "W4OWE-1", "message_display_name": "Old name",
+            "first_seen": 1, "last_seen": 20, "announce_count": 4, "last_hops": 2}]
+        graph = self.web.network_map_model()
+        peers = [node for node in graph["nodes"] if node["class"] == "peer_identity"]
+        self.assertEqual(len(peers), 2)
+        matched = next(node for node in peers if node["id"] == "peer:" + destination)
+        self.assertEqual(matched["name"], "W4OWE-1")
+        self.assertEqual(matched["subtitle"], "ffffff…ffffff")
+        self.assertEqual(matched["details"]["Interface"], "LAN")
+        self.assertEqual(matched["details"]["Via transport"], "a" * 32)
+        self.assertEqual(matched["details"]["Announce count"], 4)
+        self.assertEqual(matched["details"]["Last seen"], self.web.format_time(20))
+        plain = next(node for node in peers if node["id"] == "peer:" + unrelated)
+        self.assertEqual(plain["name"], "999999…999999")
+
     def test_api_requires_login_and_authenticated_result_has_no_controls(self):
         with self.web.app.test_client() as client:
             response = client.get("/topology/api/graph")
