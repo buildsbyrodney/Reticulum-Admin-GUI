@@ -16,6 +16,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Flask, abort, flash, jsonify, redirect, render_template, request, session, url_for
+from jinja2 import Undefined
 from werkzeug.security import check_password_hash, generate_password_hash
 from reticulum_adapter import find_interface_records, inbound_tcp_child_records
 
@@ -73,8 +74,15 @@ def format_time(value):
     return datetime.fromtimestamp(value, timezone.utc).astimezone(SERVER_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 def format_bytes(value):
-    if value is None: return "—"
-    value = int(value); units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    # Configured or detached interfaces do not always have runtime counters.
+    # Keep presentation helpers total: unavailable data must not make a page fail.
+    if value is None or isinstance(value, (Undefined, bool)): return "—"
+    try:
+        if isinstance(value, str) and not value.strip(): return "—"
+        value = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return "—"
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
     for unit in units:
         if value < 1024 or unit == units[-1]: return f"{value:.1f} {unit}" if unit != "B" else f"{value} B"
         value /= 1024
