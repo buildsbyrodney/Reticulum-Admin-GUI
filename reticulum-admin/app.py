@@ -420,10 +420,12 @@ def network_map_model():
     configured, runtime_only = merge_interface_models(configuration_model().get("interfaces", []), observed)
     interfaces = configured + runtime_only
     known = labels()
+    destination_labels = {str(value).lower(): row for (kind, value), row in known.items()
+                          if kind == "destination" and valid_destination(str(value or ""))}
     # Destination hashes are the only join key here.  This deliberately leaves
     # room for future documented announce aspects (such as nomadnetwork.node
     # or lxmf.propagation) to enrich the same node without changing its ID.
-    announced = {str(row.get("destination_hash")): row for row in messaging_announced_peers()
+    announced = {str(row.get("destination_hash")).lower(): row for row in messaging_announced_peers()
                  if valid_destination(str(row.get("destination_hash") or ""))}
     nodes, edges, by_destination = [], [], {}
 
@@ -435,22 +437,32 @@ def network_map_model():
     def destination_node(destination, *, name=None, details=None):
         if not valid_destination(destination):
             return None
+        destination = str(destination).lower()
         announce = announced.get(destination, {})
+        admin_label = destination_labels.get(destination, {}).get("label")
         # Contact labels are intentionally local presentation choices. Public
         # announce and received-message names remain informational only.
-        presentation_name = (announce.get("contact_name") or announce.get("display_name") or
+        presentation_name = (admin_label or announce.get("contact_name") or announce.get("display_name") or
                              announce.get("message_display_name") or name or short_destination(destination))
+        presentation_source = ("Admin destination label" if admin_label else
+                               "Saved Contact" if announce.get("contact_name") else
+                               "Observed LXMF announce" if announce.get("display_name") else
+                               "Received LXMF message" if announce.get("message_display_name") else
+                               "Destination hash")
         node = by_destination.get(destination)
         if node:
             node["name"] = presentation_name
             node["subtitle"] = short_destination(destination)
+            node["details"]["Presentation source"] = presentation_source
             if details: node["details"].update({k:v for k,v in details.items() if v is not None})
             return node
         node = add_node({"id": "peer:" + destination, "class": "peer_identity",
                          "name": presentation_name, "subtitle": short_destination(destination),
                          "details": {"Destination hash": destination, "Node class": "Known peer destination",
-                                     "Identity": "Unknown / not inferred",
-                                     "Presentation source": "Saved Contact" if announce.get("contact_name") else ("Observed LXMF announce" if announce.get("display_name") else ("Received LXMF message" if announce.get("message_display_name") else "Destination hash")),
+                                     "Identity": "Unknown / not inferred", "Presentation source": presentation_source,
+                                     "Current path hops": "Unavailable", "Last announce hops": "Unavailable",
+                                     "Interface": "Unavailable", "Via transport": "Unavailable",
+                                     "First seen": "Unavailable", "Last seen": "Unavailable", "Announce count": 0,
                                      **(details or {})},
                          "route": "/paths?q=" + destination})
         by_destination[destination] = node
@@ -507,17 +519,17 @@ def network_map_model():
         add_edge(local_id, sid, "local_service", "Local service attached to the managed shared instance")
 
     for path in path_models(snap.get("paths") or [], known):
-        peer = destination_node(path.get("destination"), details={"Hops": path.get("hops") if path.get("hops") is not None else "Unavailable",
+        peer = destination_node(path.get("destination"), details={"Current path hops": path.get("hops") if path.get("hops") is not None else "Unavailable",
                                                                     "Via transport": path.get("transport") or "Unknown",
                                                                     "Interface": path.get("interface") or "Unknown"})
         if peer: add_edge(local_id, peer["id"], "known_path", "Known Reticulum path; not a verified identity relationship")
 
     for peer in announced.values():
-        destination = peer.get("destination_hash")
+        destination = str(peer.get("destination_hash") or "").lower()
         peer_node = destination_node(destination, name=peer.get("contact_name") or peer.get("display_name") or peer.get("message_display_name"),
                                      details={"First seen": format_time(peer.get("first_seen")), "Last seen": format_time(peer.get("last_seen")),
                                               "Announce count": peer.get("announce_count") or 0,
-                                              "Hops": "Hops unavailable" if peer.get("last_hops") is None else peer.get("last_hops"),
+                                              "Last announce hops": "Unavailable" if peer.get("last_hops") is None else peer.get("last_hops"),
                                               "Announced display name": peer.get("display_name") or peer.get("message_display_name") or "Unknown"})
         if peer_node:
             peer_node["route"] = "/messaging/conversations/" + destination + "?tab=announces"

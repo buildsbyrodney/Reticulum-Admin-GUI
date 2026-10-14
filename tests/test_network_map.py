@@ -43,7 +43,7 @@ class NetworkMapTests(unittest.TestCase):
         peer = nodes["peer:" + "c" * 32]
         self.assertEqual(peer["name"], "Announced peer")
         self.assertEqual(peer["details"]["Identity"], "Unknown / not inferred")
-        self.assertEqual(peer["details"]["Hops"], "Hops unavailable")
+        self.assertEqual(peer["details"]["Last announce hops"], "Unavailable")
         self.assertTrue(any(edge["type"] == "tcp_client" for edge in graph["edges"]))
         self.assertTrue(any(edge["type"] == "lxmf_announce" for edge in graph["edges"]))
 
@@ -54,7 +54,7 @@ class NetworkMapTests(unittest.TestCase):
             {"hash": unrelated, "hops": 1, "via": "b" * 32, "interface": "LAN"},
         ]}, [], [])
         self.web.configuration_model = lambda: {"interfaces": []}
-        self.web.messaging_announced_peers = lambda: [{"destination_hash": destination,
+        self.web.messaging_announced_peers = lambda: [{"destination_hash": destination.upper(),
             "contact_name": None, "display_name": "W4OWE-1", "message_display_name": "Old name",
             "first_seen": 1, "last_seen": 20, "announce_count": 4, "last_hops": 2}]
         graph = self.web.network_map_model()
@@ -65,10 +65,32 @@ class NetworkMapTests(unittest.TestCase):
         self.assertEqual(matched["subtitle"], "ffffff…ffffff")
         self.assertEqual(matched["details"]["Interface"], "LAN")
         self.assertEqual(matched["details"]["Via transport"], "a" * 32)
+        self.assertEqual(matched["details"]["Current path hops"], 3)
+        self.assertEqual(matched["details"]["Last announce hops"], 2)
         self.assertEqual(matched["details"]["Announce count"], 4)
         self.assertEqual(matched["details"]["Last seen"], self.web.format_time(20))
         plain = next(node for node in peers if node["id"] == "peer:" + unrelated)
         self.assertEqual(plain["name"], "999999…999999")
+
+    def test_admin_destination_label_takes_precedence_without_merging_unrelated_hashes(self):
+        destination, unrelated = "1" * 32, "2" * 32
+        self.web.ingest_snapshot = lambda: ({"running": True, "paths": [
+            {"hash": destination.upper(), "hops": 3, "via": None, "interface": "LAN"},
+            {"hash": unrelated, "hops": None, "via": None, "interface": None},
+        ]}, [], [])
+        self.web.configuration_model = lambda: {"interfaces": []}
+        self.web.labels = lambda: {("destination", destination.upper()): {"label": "Admin-selected peer"}}
+        self.web.messaging_announced_peers = lambda: [{"destination_hash": destination,
+            "contact_name": "Saved Contact", "display_name": "Public Name", "message_display_name": "Message Name",
+            "first_seen": 1, "last_seen": 2, "announce_count": 1, "last_hops": None}]
+        graph = self.web.network_map_model()
+        nodes = {node["id"]: node for node in graph["nodes"]}
+        selected = nodes["peer:" + destination]
+        self.assertEqual(selected["name"], "Admin-selected peer")
+        self.assertEqual(selected["details"]["Presentation source"], "Admin destination label")
+        self.assertEqual(selected["details"]["Current path hops"], 3)
+        self.assertEqual(selected["details"]["Last announce hops"], "Unavailable")
+        self.assertIn("peer:" + unrelated, nodes)
 
     def test_api_requires_login_and_authenticated_result_has_no_controls(self):
         with self.web.app.test_client() as client:
