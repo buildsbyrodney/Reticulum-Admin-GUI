@@ -459,7 +459,7 @@ class LiveRnstatusTests(unittest.TestCase):
         local = json.loads(PATH_GROUP_FIXTURE.read_text())["paths"]
         small = module.path_transport_groups(local, {})
         self.assertEqual([row["count"] for row in small["groups"]], [1, 1, 1, 1])
-        self.assertTrue(small["groups"][0]["direct_local"])
+        self.assertTrue(all(row["direct_local"] for row in small["groups"]))
         self.assertEqual(sum(row["share_percent"] for row in small["groups"]), 100.0)
 
         via = "a" * 32

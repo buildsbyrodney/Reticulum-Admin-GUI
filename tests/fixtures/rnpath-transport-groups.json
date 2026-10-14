@@ -1,8 +1,8 @@
 {
   "paths": [
     {"hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "via": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "hops": 0, "interface": "Local"},
-    {"hash": "22222222222222222222222222222222", "via": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "hops": 1, "interface": "VM Access"},
-    {"hash": "33333333333333333333333333333333", "via": "cccccccccccccccccccccccccccccccc", "hops": 2, "interface": "Alabama-RNS"},
-    {"hash": "44444444444444444444444444444444", "via": "dddddddddddddddddddddddddddddddd", "hops": 3, "interface": "Alabama-RNS"}
+    {"hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "via": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "hops": 0, "interface": "Local"},
+    {"hash": "cccccccccccccccccccccccccccccccc", "via": "cccccccccccccccccccccccccccccccc", "hops": 0, "interface": "Local"},
+    {"hash": "dddddddddddddddddddddddddddddddd", "via": "dddddddddddddddddddddddddddddddd", "hops": 0, "interface": "Local"}
   ]
 }
