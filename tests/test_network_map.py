@@ -77,8 +77,8 @@ class NetworkMapTests(unittest.TestCase):
         self.assertIn('aria-expanded="false"', base)
         self.assertIn('document.documentElement.classList.add("nav-ready")', base)
         self.assertIn('event.target.closest("a")', base)
-        self.assertIn('.nav-ready .site-header nav { display: none; }', css)
-        self.assertIn('.nav-ready .site-header nav.open { display: flex;', css)
+        self.assertIn('.nav-ready .site-header .primary-navigation { display: none; }', css)
+        self.assertIn('.nav-ready .site-header .primary-navigation.open { display: block;', css)
 
 
 if __name__ == "__main__":
