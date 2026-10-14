@@ -141,6 +141,15 @@ def messaging_announced_peers(search=""):
         filters.append("(lower(p.destination_hash) LIKE ? OR lower(COALESCE(p.display_name,'')) LIKE ? OR lower(COALESCE(c.name,'')) LIKE ?)")
         values = [needle, needle, needle]
     return messaging_rows(f"""SELECT p.*, c.name AS contact_name FROM announced_peers p LEFT JOIN contacts c ON c.destination=p.destination_hash WHERE {' AND '.join(filters)} ORDER BY p.last_seen DESC LIMIT 250""", values)
+def messaging_application_announces():
+    """Public application announce observations, read-only from Messaging storage.
+
+    The Messaging service is the sole writer. Each exact destination/aspect
+    pair stays separate here; Network Map later correlates only exact hashes.
+    """
+    return messaging_rows("""SELECT a.*, c.name AS contact_name FROM application_announces a
+        LEFT JOIN contacts c ON c.destination=a.destination_hash
+        ORDER BY a.last_seen DESC LIMIT 750""")
 def messaging_peer(key):
     rows = messaging_rows("SELECT p.*, c.name AS contact_name, COALESCE(p.display_name,p.message_display_name) AS peer_name FROM announced_peers p LEFT JOIN contacts c ON c.destination=p.destination_hash WHERE p.destination_hash=?", (key,))
     return rows[0] if rows else None
@@ -422,11 +431,16 @@ def network_map_model():
     known = labels()
     destination_labels = {str(value).lower(): row for (kind, value), row in known.items()
                           if kind == "destination" and valid_destination(str(value or ""))}
-    # Destination hashes are the only join key here.  This deliberately leaves
-    # room for future documented announce aspects (such as nomadnetwork.node
-    # or lxmf.propagation) to enrich the same node without changing its ID.
+    # Destination hashes are the only join key here. Application aspects enrich
+    # that destination but never make an identity claim or create duplicate nodes.
     announced = {str(row.get("destination_hash")).lower(): row for row in messaging_announced_peers()
                  if valid_destination(str(row.get("destination_hash") or ""))}
+    observations = {}
+    for row in messaging_application_announces():
+        destination = str(row.get("destination_hash") or "").lower()
+        aspect = str(row.get("aspect") or "")
+        if valid_destination(destination) and aspect in ("lxmf.delivery", "lxmf.propagation", "nomadnetwork.node"):
+            observations.setdefault(destination, {})[aspect] = row
     nodes, edges, by_destination = [], [], {}
 
     def add_node(node):
@@ -439,14 +453,20 @@ def network_map_model():
             return None
         destination = str(destination).lower()
         announce = announced.get(destination, {})
+        aspects = observations.get(destination, {})
+        nomad = aspects.get("nomadnetwork.node", {})
+        delivery = aspects.get("lxmf.delivery", {})
+        contact_name = announce.get("contact_name") or next((row.get("contact_name") for row in aspects.values() if row.get("contact_name")), None)
         admin_label = destination_labels.get(destination, {}).get("label")
         # Contact labels are intentionally local presentation choices. Public
         # announce and received-message names remain informational only.
-        presentation_name = (admin_label or announce.get("contact_name") or announce.get("display_name") or
+        presentation_name = (admin_label or contact_name or nomad.get("display_name") or
+                             announce.get("display_name") or delivery.get("display_name") or
                              announce.get("message_display_name") or name or short_destination(destination))
         presentation_source = ("Admin destination label" if admin_label else
-                               "Saved Contact" if announce.get("contact_name") else
-                               "Observed LXMF announce" if announce.get("display_name") else
+                               "Saved Contact" if contact_name else
+                               "Observed NomadNet node announce" if nomad.get("display_name") else
+                               "Observed LXMF delivery announce" if (announce.get("display_name") or delivery.get("display_name")) else
                                "Received LXMF message" if announce.get("message_display_name") else
                                "Destination hash")
         node = by_destination.get(destination)
@@ -463,7 +483,10 @@ def network_map_model():
                                      "Current path hops": "Unavailable", "Last announce hops": "Unavailable",
                                      "Interface": "Unavailable", "Via transport": "Unavailable",
                                      "First seen": "Unavailable", "Last seen": "Unavailable", "Announce count": 0,
+                                     "Observed application aspects": "None",
+                                     "NomadNet name": "Unavailable", "LXMF display name": "Unavailable",
                                      **(details or {})},
+                         "capabilities": [],
                          "route": "/paths?q=" + destination})
         by_destination[destination] = node
         return node
@@ -532,6 +555,36 @@ def network_map_model():
                                               "Last announce hops": "Unavailable" if peer.get("last_hops") is None else peer.get("last_hops"),
                                               "Announced display name": peer.get("display_name") or peer.get("message_display_name") or "Unknown"})
         if peer_node:
+            peer_node["route"] = "/messaging/conversations/" + destination + "?tab=announces"
+            add_edge("service:messaging", peer_node["id"], "lxmf_announce", "Passive LXMF delivery announce observed by Messaging")
+
+    for destination, aspects in observations.items():
+        nomad, delivery, propagation = (aspects.get("nomadnetwork.node", {}), aspects.get("lxmf.delivery", {}), aspects.get("lxmf.propagation", {}))
+        aspect_names = ", ".join(sorted(aspects))
+        first_seen = min((row.get("first_seen") or now() for row in aspects.values()), default=None)
+        last_seen = max((row.get("last_seen") or 0 for row in aspects.values()), default=None)
+        counts = sum((row.get("announce_count") or 0 for row in aspects.values()))
+        latest = max(aspects.values(), key=lambda row: row.get("last_seen") or 0)
+        peer_node = destination_node(destination, details={
+            "Observed application aspects": aspect_names,
+            "NomadNet name": nomad.get("display_name") or "Unavailable",
+            "LXMF display name": delivery.get("display_name") or announced.get(destination, {}).get("display_name") or "Unavailable",
+            "First seen": format_time(first_seen), "Last seen": format_time(last_seen),
+            "Announce count": counts,
+            "Last announce hops": "Unavailable" if latest.get("last_hops") is None else latest.get("last_hops"),
+        })
+        if not peer_node: continue
+        capabilities = []
+        if "lxmf.delivery" in aspects: capabilities.append("lxmf_delivery")
+        if "lxmf.propagation" in aspects: capabilities.append("lxmf_propagation")
+        if "nomadnetwork.node" in aspects: capabilities.append("nomadnetwork_node")
+        peer_node["capabilities"] = capabilities
+        if "nomadnetwork.node" in aspects:
+            peer_node["route"] = None
+            add_edge("service:messaging", peer_node["id"], "nomad_announce", "Passive NomadNet node announce observed by Messaging")
+        if "lxmf.propagation" in aspects:
+            add_edge("service:messaging", peer_node["id"], "lxmf_propagation", "Passive LXMF propagation announce observed by Messaging")
+        if "lxmf.delivery" in aspects and destination not in announced:
             peer_node["route"] = "/messaging/conversations/" + destination + "?tab=announces"
             add_edge("service:messaging", peer_node["id"], "lxmf_announce", "Passive LXMF delivery announce observed by Messaging")
 

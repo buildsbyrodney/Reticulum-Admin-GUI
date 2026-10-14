@@ -18,7 +18,7 @@ class NetworkMapTests(unittest.TestCase):
 
     def setUp(self):
         self.original = {name: getattr(self.web, name) for name in (
-            "ingest_snapshot", "configuration_model", "labels", "messaging_announced_peers",
+            "ingest_snapshot", "configuration_model", "labels", "messaging_announced_peers", "messaging_application_announces",
             "bot_status", "messaging_status", "transport_enabled")}
         self.web.ingest_snapshot = lambda: ({"running": True, "paths": [{"hash": "a" * 32, "hops": 2, "via": "b" * 32, "interface": "LAN"}]}, [
             {"name": "TCPServerInterface[LAN/192.168.1.85:4243]", "short_name": "LAN", "type": "TCPServerInterface", "status_display": "Up", "mode_display": "Gateway", "client_count": 1, "ifac_netname": "Local"}], [
@@ -26,6 +26,7 @@ class NetworkMapTests(unittest.TestCase):
         self.web.configuration_model = lambda: {"interfaces": [{"name": "LAN", "type": "TCPServerInterface", "enabled": True, "mode": "gateway", "fields": {"network_name": "Local"}}]}
         self.web.labels = lambda: {("destination", "a" * 32): {"label": "Known peer"}}
         self.web.messaging_announced_peers = lambda: [{"destination_hash": "c" * 32, "display_name": "Announced peer", "message_display_name": None, "contact_name": None, "first_seen": 1, "last_seen": 2, "announce_count": 3, "last_hops": None}]
+        self.web.messaging_application_announces = lambda: []
         self.web.bot_status = lambda: {"running": True, "destination": "d" * 32, "shared_instance_connected": True}
         self.web.messaging_status = lambda: {"running": True, "destination": "e" * 32, "shared_instance_connected": True}
         self.web.transport_enabled = lambda: True
@@ -91,6 +92,31 @@ class NetworkMapTests(unittest.TestCase):
         self.assertEqual(selected["details"]["Current path hops"], 3)
         self.assertEqual(selected["details"]["Last announce hops"], "Unavailable")
         self.assertIn("peer:" + unrelated, nodes)
+
+    def test_application_aspects_enrich_one_exact_destination_without_overwriting_path(self):
+        destination, unrelated = "7" * 32, "8" * 32
+        self.web.ingest_snapshot = lambda: ({"running": True, "paths": [{"hash": destination, "hops": 3, "via": "a" * 32, "interface": "LAN"}]}, [], [])
+        self.web.configuration_model = lambda: {"interfaces": []}
+        self.web.labels = lambda: {}
+        self.web.messaging_announced_peers = lambda: [{"destination_hash": destination, "display_name": "W4OWE-1", "message_display_name": "Received name", "contact_name": None, "first_seen": 3, "last_seen": 7, "announce_count": 2, "last_hops": 2}]
+        self.web.messaging_application_announces = lambda: [
+            {"destination_hash": destination.upper(), "aspect": "lxmf.delivery", "display_name": "W4OWE-1", "first_seen": 2, "last_seen": 6, "last_hops": 2, "announce_count": 2, "contact_name": None},
+            {"destination_hash": destination, "aspect": "nomadnetwork.node", "display_name": "W4OWE Information Node", "first_seen": 1, "last_seen": 8, "last_hops": 1, "announce_count": 4, "contact_name": None},
+            {"destination_hash": destination, "aspect": "lxmf.propagation", "display_name": None, "first_seen": 4, "last_seen": 5, "last_hops": None, "announce_count": 1, "contact_name": None},
+            {"destination_hash": unrelated, "aspect": "nomadnetwork.node", "display_name": "Separate Node", "first_seen": 1, "last_seen": 2, "last_hops": None, "announce_count": 1, "contact_name": None},
+        ]
+        graph = self.web.network_map_model(); nodes = {node["id"]: node for node in graph["nodes"]}
+        peer = nodes["peer:" + destination]
+        self.assertEqual(peer["name"], "W4OWE Information Node")
+        self.assertEqual(peer["details"]["Presentation source"], "Observed NomadNet node announce")
+        self.assertEqual(peer["details"]["NomadNet name"], "W4OWE Information Node")
+        self.assertEqual(peer["details"]["LXMF display name"], "W4OWE-1")
+        self.assertEqual(peer["details"]["Current path hops"], 3)
+        self.assertEqual(peer["details"]["Last announce hops"], 1)
+        self.assertIn("nomadnetwork.node", peer["details"]["Observed application aspects"])
+        self.assertEqual(peer["capabilities"], ["lxmf_delivery", "lxmf_propagation", "nomadnetwork_node"])
+        self.assertIn("peer:" + unrelated, nodes)
+        self.assertEqual(len([node for node in nodes if node == "peer:" + destination]), 1)
 
     def test_api_requires_login_and_authenticated_result_has_no_controls(self):
         with self.web.app.test_client() as client:
