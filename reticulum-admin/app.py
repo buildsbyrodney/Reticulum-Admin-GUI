@@ -580,11 +580,12 @@ def network_map_model():
         if "nomadnetwork.node" in aspects: capabilities.append("nomadnetwork_node")
         peer_node["capabilities"] = capabilities
         if "nomadnetwork.node" in aspects:
-            peer_node["route"] = None
+            # A Nomad viewer is a future feature. Until then its generic Paths
+            # fallback remains useful; never discard a more useful route.
             add_edge("service:messaging", peer_node["id"], "nomad_announce", "Passive NomadNet node announce observed by Messaging")
         if "lxmf.propagation" in aspects:
             add_edge("service:messaging", peer_node["id"], "lxmf_propagation", "Passive LXMF propagation announce observed by Messaging")
-        if "lxmf.delivery" in aspects and destination not in announced:
+        if "lxmf.delivery" in aspects:
             peer_node["route"] = "/messaging/conversations/" + destination + "?tab=announces"
             add_edge("service:messaging", peer_node["id"], "lxmf_announce", "Passive LXMF delivery announce observed by Messaging")
 

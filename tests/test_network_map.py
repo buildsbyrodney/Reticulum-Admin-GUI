@@ -115,8 +115,25 @@ class NetworkMapTests(unittest.TestCase):
         self.assertEqual(peer["details"]["Last announce hops"], 1)
         self.assertIn("nomadnetwork.node", peer["details"]["Observed application aspects"])
         self.assertEqual(peer["capabilities"], ["lxmf_delivery", "lxmf_propagation", "nomadnetwork_node"])
+        self.assertEqual(peer["route"], "/messaging/conversations/" + destination + "?tab=announces")
         self.assertIn("peer:" + unrelated, nodes)
         self.assertEqual(len([node for node in nodes if node == "peer:" + destination]), 1)
+
+    def test_application_capabilities_keep_the_most_useful_existing_route(self):
+        lxmf, nomad, propagation = "3" * 32, "4" * 32, "5" * 32
+        self.web.ingest_snapshot = lambda: ({"running": True, "paths": [{"hash": propagation, "hops": 2, "via": None, "interface": "LAN"}]}, [], [])
+        self.web.configuration_model = lambda: {"interfaces": []}; self.web.labels = lambda: {}
+        self.web.messaging_announced_peers = lambda: []
+        self.web.messaging_application_announces = lambda: [
+            {"destination_hash": lxmf, "aspect": "lxmf.delivery", "display_name": "Chat", "first_seen": 1, "last_seen": 3, "last_hops": 1, "announce_count": 1, "contact_name": None},
+            {"destination_hash": lxmf, "aspect": "nomadnetwork.node", "display_name": "Chat Node", "first_seen": 1, "last_seen": 2, "last_hops": 1, "announce_count": 1, "contact_name": None},
+            {"destination_hash": nomad, "aspect": "nomadnetwork.node", "display_name": "Only Node", "first_seen": 1, "last_seen": 2, "last_hops": None, "announce_count": 1, "contact_name": None},
+            {"destination_hash": propagation, "aspect": "lxmf.propagation", "display_name": None, "first_seen": 1, "last_seen": 2, "last_hops": None, "announce_count": 1, "contact_name": None},
+        ]
+        nodes = {node["id"]: node for node in self.web.network_map_model()["nodes"]}
+        self.assertEqual(nodes["peer:" + lxmf]["route"], "/messaging/conversations/" + lxmf + "?tab=announces")
+        self.assertEqual(nodes["peer:" + nomad]["route"], "/paths?q=" + nomad)
+        self.assertEqual(nodes["peer:" + propagation]["route"], "/paths?q=" + propagation)
 
     def test_api_requires_login_and_authenticated_result_has_no_controls(self):
         with self.web.app.test_client() as client:
