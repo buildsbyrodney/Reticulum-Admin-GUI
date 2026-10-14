@@ -192,6 +192,12 @@ Incident Recovery is explicit dynamic-state cleanup, not an automatic ban system
 
 Blackholing affects this operator's own Reticulum network segments; it does not globally ban an identity. Dropping paths removes currently learned route state, but routes can be learned again if they continue to be announced. **Drop queued announces is broad local queue cleanup**, not peer-selective, and requires typing `DROP ANNOUNCES`. Detaching an interface requires typing `DETACH`. Recovery steps execute in a deterministic displayed order and stop at the first failure; the durable incident record is marked Completed, Partially completed, or Failed.
 
+### Path floods and Paths by Transport
+
+**Paths by Transport** groups the current Reticulum path table by the exact `via` transport hash reported for each destination. A destination hash identifies one learned route target; the `via` transport hash identifies the route source currently used for that path. A large concentration through one `via` is an observation worth reviewing, not proof that the transport is malicious. The display retains only a few destination samples so it stays usable during large incidents.
+
+Use **Review drop-via** when one exact transport is responsible for routes you deliberately want to remove. It pre-fills the existing Incident Recovery review and does not execute anything by itself. **Drop queued announces** clears this node's local announce queues globally; it does not block a peer permanently and cannot stop a continuing source from learning routes again. Blackholing thousands of destination hashes is usually the wrong response to a path flood: destinations are learned route state, not necessarily verified identities or the common source of the paths.
+
 ## Safe Configuration Changes and Snapshots
 
 ### Understanding Interfaces

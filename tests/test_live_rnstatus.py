@@ -12,6 +12,7 @@ ROOT = Path(__file__).parents[1]
 APP_DIR = ROOT / "reticulum-admin"
 FIXTURE = ROOT / "tests" / "fixtures" / "rnstatus-1.5.7-pi.json"
 TCP_CHILD_FIXTURE = ROOT / "tests" / "fixtures" / "rnstatus-1.5.7-tcp-child.json"
+PATH_GROUP_FIXTURE = ROOT / "tests" / "fixtures" / "rnpath-transport-groups.json"
 
 
 class LiveRnstatusTests(unittest.TestCase):
@@ -452,6 +453,81 @@ class LiveRnstatusTests(unittest.TestCase):
             self.assertIn("known as a destination", rejected.get_data(as_text=True))
         finally:
             module.snapshot, module.management, module.ingest_snapshot = original_snapshot, original_management, original_ingest
+
+    def test_paths_group_by_exact_via_with_bounded_samples_and_conservative_warnings(self):
+        module = self.app_module
+        local = json.loads(PATH_GROUP_FIXTURE.read_text())["paths"]
+        small = module.path_transport_groups(local, {})
+        self.assertEqual([row["count"] for row in small["groups"]], [1, 1, 1, 1])
+        self.assertTrue(all(row["direct_local"] for row in small["groups"]))
+        self.assertEqual(sum(row["share_percent"] for row in small["groups"]), 100.0)
+
+        via = "a" * 32
+        concentrated = [{"hash": f"{index:032x}", "via": via, "hops": 2 + (index % 3), "interface": "Alabama-RNS"} for index in range(4000)]
+        grouped = module.path_transport_groups(concentrated, {("transport", via): {"label": "Trusted Upstream"}})
+        self.assertEqual(len(grouped["groups"]), 1)
+        row = grouped["groups"][0]
+        self.assertEqual((row["count"], row["share_percent"], row["min_hops"], row["max_hops"]), (4000, 100.0, 2, 4))
+        self.assertEqual(row["label"], "Trusted Upstream")
+        self.assertEqual(len(row["samples"]), 5)
+        self.assertEqual(row["interfaces"], ["Alabama-RNS"])
+        self.assertIn("High concentration", " ".join(module.path_health_summary(concentrated)["warnings"]))
+        self.assertNotIn("High concentration", " ".join(module.path_health_summary(concentrated[:99])["warnings"]))
+
+        unavailable = [{"hash": f"{index:032x}", "hops": 2, "interface": "Unknown"} for index in range(4000)]
+        unavailable_health = module.path_health_summary(unavailable)
+        self.assertEqual((len(unavailable_health["groups"]), unavailable_health["groups"][0]["transport"], unavailable_health["groups"][0]["count"]), (1, "", 4000))
+        self.assertNotIn("High concentration", " ".join(unavailable_health["warnings"]))
+
+    def test_grouped_paths_page_and_recovery_prefill_are_read_only_until_reviewed(self):
+        module = self.app_module
+        via = "b" * 32
+        paths = [{"hash": f"{index:032x}", "via": via, "hops": 3, "interface": "VM Access"} for index in range(4000)]
+        original_ingest, original_management = module.ingest_snapshot, module.management
+        calls = []
+        module.ingest_snapshot = lambda: ({"paths": paths, "path_error": None}, [], [])
+        module.management = lambda endpoint, *args, **kwargs: calls.append(endpoint) or {"capabilities": {"drop_via_transport": True, "drop_announces": True}}
+        try:
+            page = self.client().get("/paths").get_data(as_text=True)
+            self.assertIn("Paths by transport", page)
+            self.assertIn("Showing the first 200 matching raw paths of 4000", page)
+            self.assertIn(via, page)
+            recovery = self.client().get(f"/recovery?transport={via}&drop_via=1").get_data(as_text=True)
+            self.assertIn("Review drop-via", recovery)
+            self.assertIn(f'value="{via}"', recovery)
+            self.assertIn('name="drop_via" checked', recovery)
+            self.assertNotIn("/execute", calls)
+
+            module.ingest_snapshot = lambda: ({"paths": [{"hash": f"{index:032x}", "hops": 2} for index in range(4000)], "path_error": None}, [], [])
+            unavailable_recovery = self.client().get("/recovery").get_data(as_text=True)
+            self.assertIn("Unavailable", unavailable_recovery)
+            self.assertNotIn("High concentration of learned paths through one transport", unavailable_recovery)
+            self.assertNotIn("transport=", unavailable_recovery)
+        finally:
+            module.ingest_snapshot, module.management = original_ingest, original_management
+
+    def test_path_observation_history_and_growth_event_keep_only_summary(self):
+        module = self.app_module
+        original_snapshot = module.snapshot
+        first_via, second_via = "c" * 32, "d" * 32
+        snapshots = [
+            {"status": None, "paths": [{"hash": f"{index:032x}", "via": first_via, "hops": 2} for index in range(100)], "observer_sequence": 1, "collected_at": "first"},
+            {"status": None, "paths": [{"hash": f"{index:032x}", "via": second_via, "hops": 3} for index in range(150)], "observer_sequence": 2, "collected_at": "second"},
+        ]
+        try:
+            with module.db() as con:
+                con.execute("DELETE FROM observer_state"); con.execute("DELETE FROM path_observations"); con.execute("DELETE FROM events")
+            module.snapshot = lambda: snapshots.pop(0)
+            module.ingest_snapshot(); module.ingest_snapshot()
+            history = module.path_observation_history()
+            self.assertEqual((history[0]["total_paths"], history[0]["top_via"], history[0]["top_via_count"], history[0]["unique_vias"]), (150, second_via, 150, 1))
+            with module.db() as con:
+                event = con.execute("SELECT detail_json FROM events WHERE kind='path_growth' ORDER BY id DESC LIMIT 1").fetchone()
+            detail = json.loads(event["detail_json"])
+            self.assertEqual((detail["previous_total"], detail["new_total"], detail["delta"], detail["top_via"], detail["top_via_count"]), (100, 150, 50, second_via, 150))
+            self.assertNotIn("destination", detail)
+        finally:
+            module.snapshot = original_snapshot
 
 
 if __name__ == "__main__":

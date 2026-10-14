@@ -1,0 +1,8 @@
+{
+  "paths": [
+    {"hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "via": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "hops": 0, "interface": "Local"},
+    {"hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "via": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "hops": 0, "interface": "Local"},
+    {"hash": "cccccccccccccccccccccccccccccccc", "via": "cccccccccccccccccccccccccccccccc", "hops": 0, "interface": "Local"},
+    {"hash": "dddddddddddddddddddddddddddddddd", "via": "dddddddddddddddddddddddddddddddd", "hops": 0, "interface": "Local"}
+  ]
+}

@@ -42,6 +42,16 @@ if not app.config["SECRET_KEY"]:
 
 def now(): return int(time.time())
 
+# These are deliberately conservative observability thresholds, not automated
+# mitigation triggers. They are constants so a later settings surface can tune
+# them without changing how paths are grouped or recovered.
+PATH_ELEVATED_COUNT = 100
+PATH_CONCENTRATION_MIN_COUNT = 100
+PATH_CONCENTRATION_SHARE = 0.50
+PATH_HIGH_COUNT = 1000
+PATH_TRANSPORT_SAMPLE_LIMIT = 5
+PATH_HISTORY_LIMIT = 500
+
 def db():
     APP_DATA.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH, timeout=15); con.row_factory = sqlite3.Row
@@ -56,9 +66,11 @@ def db():
       CREATE TABLE IF NOT EXISTS incidents (id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, admin TEXT NOT NULL, target_json TEXT NOT NULL, actions_json TEXT NOT NULL, preview_json TEXT NOT NULL, results_json TEXT, notes TEXT, status TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS config_changes (id INTEGER PRIMARY KEY, occurred_at INTEGER NOT NULL, admin TEXT NOT NULL, setting TEXT NOT NULL, old_value TEXT, new_value TEXT, snapshot_id TEXT, apply_method TEXT, result TEXT NOT NULL, rolled_back INTEGER NOT NULL DEFAULT 0, error TEXT);
       CREATE TABLE IF NOT EXISTS ui_preferences (pref_key TEXT PRIMARY KEY, pref_value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS path_observations (id INTEGER PRIMARY KEY, observed_at INTEGER NOT NULL, observer_sequence TEXT, total_paths INTEGER NOT NULL, top_via TEXT, top_via_count INTEGER NOT NULL, unique_vias INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS events_filter_idx ON events(occurred_at, kind, interface_name, remote_ip);
       CREATE INDEX IF NOT EXISTS connections_active_idx ON connections(connection_key, status);
       CREATE INDEX IF NOT EXISTS label_history_entity_idx ON label_history(entity_type, entity_value, id DESC);
+      CREATE INDEX IF NOT EXISTS path_observations_time_idx ON path_observations(observed_at DESC, id DESC);
     """)
     # Keep existing persistent installations compatible with the operation-ID audit trail.
     try: con.execute("ALTER TABLE config_changes ADD COLUMN operation_id TEXT")
@@ -343,7 +355,9 @@ def current_clients(interfaces, configured=None):
 def ingest_snapshot():
     snap = snapshot(); interfaces = find_interface_records(snap.get("status")) if snap.get("status") else []; clients = current_clients(interfaces, config_interfaces())
     discovered = discovered_interface_models(snap, interfaces)
-    state = {"interfaces": {x["name"]: x.get("status") for x in interfaces}, "clients": {x["key"]: x for x in clients}, "client_counts": {x["name"]: x["client_count"] for x in interfaces if x.get("client_count") is not None}, "held_announce_total": sum(x.get("held_announces") or 0 for x in interfaces), "announce_total": sum(x.get("announces") or 0 for x in interfaces), "path_count": len(snap.get("paths") or []), "discovered": {row["key"]: row for row in discovered}}
+    path_summary = path_health_summary(snap.get("paths") or [])
+    observation_token = str(snap.get("observer_sequence") or snap.get("collected_at") or "")
+    state = {"interfaces": {x["name"]: x.get("status") for x in interfaces}, "clients": {x["key"]: x for x in clients}, "client_counts": {x["name"]: x["client_count"] for x in interfaces if x.get("client_count") is not None}, "held_announce_total": sum(x.get("held_announces") or 0 for x in interfaces), "announce_total": sum(x.get("announces") or 0 for x in interfaces), "path_count": path_summary["total"], "path_observation_token": observation_token, "top_via": (path_summary["top"] or {}).get("transport"), "top_via_count": (path_summary["top"] or {}).get("count", 0), "unique_vias": len(path_summary["groups"]), "discovered": {row["key"]: row for row in discovered}}
     with db() as con:
         row = con.execute("SELECT value_json FROM observer_state WHERE state_key='latest'").fetchone(); prior = json.loads(row["value_json"]) if row else {"interfaces": {}, "clients": {}, "client_counts": {}, "held_announce_total": 0, "announce_total": 0, "path_count": 0}
         for name, status in state["interfaces"].items():
@@ -374,7 +388,15 @@ def ingest_snapshot():
                 con.execute("INSERT INTO events(occurred_at,kind,severity,message) VALUES(?,?,?,?)", (now(), "discovered_interface_disappeared", "info", f"Discovered interface {item.get('name', 'unknown')} disappeared"))
         if state["held_announce_total"] >= 100 and state["held_announce_total"] > prior.get("held_announce_total", 0): con.execute("INSERT INTO events(occurred_at,kind,severity,message) VALUES(?,?,?,?)", (now(), "queue_warning", "warning", f"Held announces increased to {state['held_announce_total']}"))
         if state["announce_total"] - prior.get("announce_total", 0) >= 100: con.execute("INSERT INTO events(occurred_at,kind,severity,message) VALUES(?,?,?,?)", (now(), "announce_rate", "warning", f"High announce activity: {state['announce_total'] - prior['announce_total']} new announces"))
-        if state["path_count"] - prior.get("path_count", 0) >= 25: con.execute("INSERT INTO events(occurred_at,kind,severity,message) VALUES(?,?,?,?)", (now(), "path_growth", "warning", f"{state['path_count'] - prior['path_count']} new paths learned"))
+        path_delta = state["path_count"] - prior.get("path_count", 0)
+        if path_delta >= 25:
+            detail = {"previous_total": prior.get("path_count", 0), "new_total": state["path_count"], "delta": path_delta,
+                      "top_via": state["top_via"], "top_via_count": state["top_via_count"],
+                      "top_via_share": round((state["top_via_count"] / state["path_count"]) * 100, 1) if state["path_count"] else 0}
+            con.execute("INSERT INTO events(occurred_at,kind,severity,message,detail_json) VALUES(?,?,?,?,?)", (now(), "path_growth", "warning", f"{path_delta} new paths learned", json.dumps(detail)))
+        if observation_token and observation_token != prior.get("path_observation_token"):
+            con.execute("INSERT INTO path_observations(observed_at,observer_sequence,total_paths,top_via,top_via_count,unique_vias) VALUES(?,?,?,?,?,?)", (now(), observation_token, state["path_count"], state["top_via"], state["top_via_count"], state["unique_vias"]))
+            con.execute("DELETE FROM path_observations WHERE id NOT IN (SELECT id FROM path_observations ORDER BY id DESC LIMIT ?)", (PATH_HISTORY_LIMIT,))
         con.execute("INSERT INTO observer_state(state_key,value_json,updated_at) VALUES('latest',?,?) ON CONFLICT(state_key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at", (json.dumps(state), now()))
     return snap, interfaces, clients
 
@@ -425,6 +447,65 @@ def path_models(raw_paths, known, query=""):
                      "destination_label": destination_label, "transport_label": transport_label,
                      "identity_label": identity_label, "hash_type": "Destination", "identity_relationship": "Verified" if identity else "Unknown"})
     return rows
+
+def path_transport_groups(raw_paths, known=None, sample_limit=PATH_TRANSPORT_SAMPLE_LIMIT):
+    """Summarise the current path table by Reticulum's exact `via` value.
+
+    This is intentionally O(n), retains only a few destination samples, and
+    does not turn a transport hash into an asserted identity or host name.
+    """
+    known, groups, total = known or {}, {}, 0
+    for raw in raw_paths or []:
+        if not isinstance(raw, dict):
+            continue
+        total += 1
+        transport = str(raw.get("via") or "")
+        group = groups.setdefault(transport, {"transport": transport, "count": 0, "hops": [], "interfaces": set(), "samples": [], "direct_local": False})
+        group["count"] += 1
+        try:
+            hops = int(raw.get("hops")) if raw.get("hops") is not None else None
+        except (TypeError, ValueError):
+            hops = None
+        if hops is not None:
+            group["hops"].append(hops)
+        interface = raw.get("interface")
+        if interface:
+            group["interfaces"].add(str(interface))
+        destination = str(raw.get("hash") or "")
+        if destination and len(group["samples"]) < sample_limit:
+            group["samples"].append(destination)
+        if transport and destination == transport and hops == 0:
+            group["direct_local"] = True
+    rows = []
+    for group in groups.values():
+        transport = group["transport"]
+        rows.append({"transport": transport, "label": known.get(("transport", transport), {}).get("label"),
+                     "count": group["count"], "share": (group["count"] / total) if total else 0,
+                     "share_percent": round((group["count"] / total) * 100, 1) if total else 0,
+                     "min_hops": min(group["hops"]) if group["hops"] else None,
+                     "max_hops": max(group["hops"]) if group["hops"] else None,
+                     "interfaces": sorted(group["interfaces"]), "samples": group["samples"],
+                     "direct_local": group["direct_local"], "path_state": "Direct/local path observed" if group["direct_local"] else "Via transport"})
+    rows.sort(key=lambda row: (-row["count"], row["transport"]))
+    return {"total": total, "groups": rows}
+
+def path_health_summary(raw_paths, known=None):
+    grouped = path_transport_groups(raw_paths, known)
+    top = grouped["groups"][0] if grouped["groups"] else None
+    warnings = []
+    if grouped["total"] >= PATH_HIGH_COUNT:
+        warnings.append("High path count: 1,000 or more paths are currently known.")
+    elif grouped["total"] >= PATH_ELEVATED_COUNT:
+        warnings.append("Elevated path count: 100 or more paths are currently known.")
+    if top and valid_destination(top["transport"]) and top["count"] >= PATH_CONCENTRATION_MIN_COUNT and top["share"] >= PATH_CONCENTRATION_SHARE:
+        warnings.append("High concentration of learned paths through one transport.")
+    return {**grouped, "top": top, "warnings": warnings,
+            "thresholds": {"elevated": PATH_ELEVATED_COUNT, "concentration_count": PATH_CONCENTRATION_MIN_COUNT,
+                           "concentration_share": PATH_CONCENTRATION_SHARE, "high": PATH_HIGH_COUNT}}
+
+def path_observation_history(limit=12):
+    with db() as con:
+        return [dict(row) for row in con.execute("SELECT * FROM path_observations ORDER BY id DESC LIMIT ?", (limit,))]
 
 def network_map_model():
     """Build a conservative, read-only graph from data the UI already has.
@@ -982,7 +1063,8 @@ def dashboard():
     with db() as con:
         recent = con.execute("SELECT * FROM events ORDER BY occurred_at DESC LIMIT 8").fetchall(); warnings = con.execute("SELECT COUNT(*) AS n FROM events WHERE severity='warning' AND occurred_at>?", (now()-86400,)).fetchone()["n"]
         onboarding = con.execute("SELECT pref_value FROM ui_preferences WHERE pref_key='onboarding_dismissed'").fetchone() is None
-    return render_template("dashboard.html", title="Dashboard", snap=snap, interfaces=interfaces, configured=configured, clients=clients, client_count=sum(x["client_count"] or 0 for x in interfaces), transport=transport_enabled(), recent=recent, warnings=warnings, onboarding=onboarding)
+    path_health = path_health_summary(snap.get("paths") or [], labels())
+    return render_template("dashboard.html", title="Dashboard", snap=snap, interfaces=interfaces, configured=configured, clients=clients, client_count=sum(x["client_count"] or 0 for x in interfaces), transport=transport_enabled(), recent=recent, warnings=warnings, onboarding=onboarding, path_health=path_health, path_history=path_observation_history(6))
 
 @app.get("/interfaces")
 @login_required
@@ -1218,8 +1300,9 @@ def logs():
 def paths():
     snap, _, _ = ingest_snapshot()
     known = labels(); query = request.args.get("q", "")
-    paths = path_models(snap.get("paths") or [], known, query)
-    return render_template("paths.html", title="Paths", paths=paths, error=snap.get("path_error"), known=known, query=query)
+    all_paths = path_models(snap.get("paths") or [], known, query)
+    return render_template("paths.html", title="Paths", paths=all_paths[:200], raw_path_count=len(all_paths), paths_truncated=len(all_paths) > 200,
+                           path_health=path_health_summary(snap.get("paths") or [], known), error=snap.get("path_error"), known=known, query=query)
 
 @app.get("/hashes/<value>")
 @login_required
@@ -1256,7 +1339,8 @@ def recovery():
     warnings = []
     if target["identity"] and any(kind == "Destination path" for kind, _ in hash_context(target["identity"], rows, known)):
         warnings.append("This hash is known as a destination, not a verified identity. Blackholing requires an identity hash.")
-    return render_template("recovery.html", title="Incident Recovery", capabilities=capabilities, target=target, labels=known, warnings=warnings)
+    return render_template("recovery.html", title="Incident Recovery", capabilities=capabilities, target=target, labels=known, warnings=warnings,
+                           path_health=path_health_summary(snap.get("paths") or [], known), preselect_drop_via=request.args.get("drop_via") == "1")
 
 @app.post("/recovery/apply")
 @login_required
@@ -1318,7 +1402,7 @@ def diagnostics():
     snap, observed, clients = ingest_snapshot(); rows, _ = merge_interface_models(configuration_model().get("interfaces", []), observed)
     discovered = discovered_interface_models(snap, observed)
     health = {"Shared Instance": snap.get("reticulum_ready") is True and not snap.get("status_error"), "Transport Mode": transport_enabled(), "Known Paths": len(snap.get("paths") or []), "Configured Interfaces": len(rows), "Runtime Interfaces": len(observed), "Connected Clients": len(clients), "Observer": bool(snap.get("collected_at")), "Management Agent": bool(management("/capabilities").get("capabilities")), "Discovery enabled": config_yes((configuration_model().get("global") or {}).get("discover_interfaces")), "Interfaces discovered": len(discovered), "Auto-connected interfaces": sum(1 for row in discovered if row["auto_connected"])}
-    return render_template("diagnostics.html", title="Diagnostics", rows=rows, health=health, bot=bot_status())
+    return render_template("diagnostics.html", title="Diagnostics", rows=rows, health=health, bot=bot_status(), path_health=path_health_summary(snap.get("paths") or [], labels()))
 
 @app.get("/diagnostics/interfaces/<name>")
 @login_required
