@@ -7,16 +7,29 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
 </head>
 <body>
-  <header>
+  <header class="site-header">
     <a class="brand" href="{{ url_for('dashboard') }}">Reticulum Admin</a>
     {% if session.admin %}
-    <nav>{% for key,label in [('interfaces','Interfaces'),('topology','Topology'),('discovery','Discovery'),('messaging','Messaging' ~ (' (' ~ messaging_unread ~ ')' if messaging_unread else '')),('clients','Connected Clients'),('timeline','Timeline'),('paths','Paths'),('diagnostics','Diagnostics'),('test_echo_bot','Bot'),('announces','Announces'),('queues','Queues'),('blackholes','Blackholes'),('recovery','Incident Recovery'),('incident_history','Incident History'),('logs','Logs'),('configuration','Configuration'),('snapshots','Snapshots'),('system','System'),('help_concepts','Help / Concepts')] %}<a href="{{ url_for(key) }}">{{ label }}</a>{% endfor %}</nav>
-    <form action="{{ url_for('logout') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button>Sign out</button></form>
+    <button type="button" class="nav-toggle" id="nav-toggle" aria-label="Open navigation menu" aria-controls="primary-navigation" aria-expanded="false">☰ <span>Menu</span></button>
+    <div id="primary-navigation" class="primary-navigation"><nav>{% for key,label in [('interfaces','Interfaces'),('topology','Network Map'),('discovery','Discovery'),('messaging','Messaging' ~ (' (' ~ messaging_unread ~ ')' if messaging_unread else '')),('clients','Connected Clients'),('timeline','Timeline'),('paths','Paths'),('diagnostics','Diagnostics'),('test_echo_bot','Bot'),('announces','Announces'),('queues','Queues'),('blackholes','Blackholes'),('recovery','Incident Recovery'),('incident_history','Incident History'),('logs','Logs'),('configuration','Configuration'),('snapshots','Snapshots'),('system','System'),('help_concepts','Help / Concepts')] %}<a href="{{ url_for(key) }}">{{ label }}</a>{% endfor %}</nav></div>
+    <form class="sign-out" action="{{ url_for('logout') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button>Sign out</button></form>
     {% endif %}
   </header>
   <main>{% with messages=get_flashed_messages(with_categories=true) %}{% for category,message in messages %}<p class="flash {{ category }}">{{ message }}</p>{% endfor %}{% endwith %}{% block content %}{% endblock %}</main>
   <footer>Reticulum Admin v{{ app_version }} · Access: {{ access_mode }} · Times: {{ server_timezone }} · Web UI has no Docker socket.</footer>
   <script>
+    // With no JavaScript the links remain visible. Once scripts are ready,
+    // narrow displays collapse them behind this accessible toggle.
+    document.documentElement.classList.add("nav-ready");
+    (function () {
+      const button = document.getElementById("nav-toggle");
+      const nav = document.getElementById("primary-navigation");
+      if (!button || !nav) return;
+      function close() { nav.classList.remove("open"); button.setAttribute("aria-expanded", "false"); button.setAttribute("aria-label", "Open navigation menu"); }
+      button.addEventListener("click", function () { const open = !nav.classList.contains("open"); nav.classList.toggle("open", open); button.setAttribute("aria-expanded", String(open)); button.setAttribute("aria-label", open ? "Close navigation menu" : "Open navigation menu"); });
+      nav.addEventListener("click", function (event) { if (event.target.closest("a")) close(); });
+    }());
+
     // Browsers may increment a focused number input on a normal page scroll.
     // Removing focus before the default wheel action keeps the scroll for the
     // page while requiring typing or the input's own controls to change data.
