@@ -10,6 +10,7 @@ MIN_INTERVAL, MAX_BODY = 15, 4000
 PATH_LOOKUP_SECONDS = max(1, min(30, int(os.environ.get("MESSAGING_PATH_LOOKUP_SECONDS", "10"))))
 DESTINATION_RE = re.compile(r"[0-9a-fA-F]{32}")
 TERMINAL_OUTBOUND_STATES = {"Delivered", "Failed"}
+APPLICATION_ASPECTS = ("lxmf.delivery", "lxmf.propagation", "nomadnetwork.node")
 
 def atomic_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True); tmp = path.with_suffix(path.suffix + ".tmp")
@@ -30,34 +31,37 @@ def connect():
       CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, conversation_key TEXT NOT NULL, direction TEXT NOT NULL, sender_destination TEXT, recipient_destination TEXT, sender_name TEXT, body TEXT NOT NULL, received_at INTEGER NOT NULL, read_at INTEGER, delivery_state TEXT NOT NULL, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS contacts (id INTEGER PRIMARY KEY, name TEXT NOT NULL, destination TEXT NOT NULL UNIQUE, notes TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS announced_peers (destination_hash TEXT PRIMARY KEY, identity_hash TEXT, display_name TEXT, message_display_name TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, last_hops INTEGER, announce_count INTEGER NOT NULL DEFAULT 1);
+      CREATE TABLE IF NOT EXISTS application_announces (destination_hash TEXT NOT NULL, aspect TEXT NOT NULL, identity_hash TEXT, display_name TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, last_hops INTEGER, announce_count INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(destination_hash, aspect));
       CREATE INDEX IF NOT EXISTS messages_conversation_idx ON messages(conversation_key, received_at);
       CREATE INDEX IF NOT EXISTS announced_peers_last_seen_idx ON announced_peers(last_seen DESC);
       CREATE INDEX IF NOT EXISTS announced_peers_display_name_idx ON announced_peers(display_name);
+      CREATE INDEX IF NOT EXISTS application_announces_last_seen_idx ON application_announces(last_seen DESC);
+      CREATE INDEX IF NOT EXISTS application_announces_aspect_idx ON application_announces(aspect, last_seen DESC);
     """)
     try: con.execute("ALTER TABLE announced_peers ADD COLUMN message_display_name TEXT")
     except sqlite3.OperationalError: pass
     return con
 
-class LXMFDeliveryAnnounceHandler:
-    """Passive handler for the documented Reticulum lxmf.delivery aspect."""
-    aspect_filter = "lxmf.delivery"
-    def __init__(self, service): self.service = service
+class ApplicationAnnounceHandler:
+    """Passive observer for one documented Reticulum application aspect."""
+    def __init__(self, service, aspect): self.service, self.aspect_filter = service, aspect
     def received_announce(self, destination_hash, announced_identity, app_data, announce_packet_hash):
-        self.service.receive_announce(destination_hash, announced_identity, app_data)
+        self.service.receive_application_announce(self.aspect_filter, destination_hash, announced_identity, app_data)
 
 class Messaging:
     def __init__(self):
-        self.router = self.destination = self.identity = self.announce_handler = None; self.started = int(time.time())
+        self.router = self.destination = self.identity = self.announce_handler = None; self.announce_handlers = []; self.started = int(time.time())
         # In-memory marker for this process only. A fresh process deliberately
         # retries interrupted Pending/Queued rows once, since LXMF callbacks
         # do not survive a service restart.
         self.session_id = uuid.uuid4().hex; self.inflight_message_ids = set()
-        self.state = {"last_message_received": None, "last_message_sent": None, "last_error": None, "last_announce": None, "last_lxmf_delivery_announce": None, "lxmf_delivery_announces_observed": 0}
+        self.state = {"last_message_received": None, "last_message_sent": None, "last_error": None, "last_announce": None, "last_lxmf_delivery_announce": None, "lxmf_delivery_announces_observed": 0, "last_application_announce": None, "application_announces_observed": 0, "application_announce_counts": {aspect: 0 for aspect in APPLICATION_ASPECTS}}
     def status(self, ready=False):
         with connect() as con:
             pending = con.execute("SELECT count(*) FROM messages WHERE direction='outbound' AND delivery_state IN ('Pending','Queued')").fetchone()[0]
             stored_peers = con.execute("SELECT count(*) FROM announced_peers WHERE announce_count > 0").fetchone()[0]
-        atomic_json(STATE / "status.json", {"running": ready, "process_running": True, "shared_instance_connected": ready, "lxmf_router_ready": bool(self.router), "announce_listener_registered": bool(self.announce_handler), "identity_loaded": bool(self.identity), "destination": self.destination.hash.hex() if self.destination else None, "identity": self.identity.hash.hex() if self.identity else None, "display_name": settings()["display_name"], "uptime_seconds": int(time.time())-self.started, "pending_outbound": pending, "unique_lxmf_delivery_peers": stored_peers, **self.state})
+            unique_destinations = con.execute("SELECT count(DISTINCT destination_hash) FROM application_announces").fetchone()[0]
+        atomic_json(STATE / "status.json", {"running": ready, "process_running": True, "shared_instance_connected": ready, "lxmf_router_ready": bool(self.router), "announce_listener_registered": bool(self.announce_handlers), "identity_loaded": bool(self.identity), "destination": self.destination.hash.hex() if self.destination else None, "identity": self.identity.hash.hex() if self.identity else None, "display_name": settings()["display_name"], "uptime_seconds": int(time.time())-self.started, "pending_outbound": pending, "unique_lxmf_delivery_peers": stored_peers, "unique_application_announce_destinations": unique_destinations, **self.state})
     def announce(self):
         self.router.announce(self.destination.hash); self.state["last_announce"] = int(time.time()); self.state["last_error"] = None
     def receive(self, message):
@@ -79,16 +83,36 @@ class Messaging:
         self.state["last_message_received"] = stamp; self.state["last_error"] = None
 
     def receive_announce(self, destination_hash, announced_identity=None, app_data=None):
-        """Store public LXMF delivery announce metadata; never take action on it."""
+        """Compatibility entry point for the existing LXMF delivery observer."""
+        self.receive_application_announce("lxmf.delivery", destination_hash, announced_identity, app_data)
+
+    @staticmethod
+    def nomad_name_from_app_data(app_data):
+        """NomadNet Node.announce() publishes the UTF-8 node name directly."""
+        if isinstance(app_data, bytes): value = app_data.decode("utf-8", errors="strict")
+        elif isinstance(app_data, str): value = app_data
+        else: return None
+        value = value.strip()
+        return value[:80] if value else None
+
+    def receive_application_announce(self, aspect, destination_hash, announced_identity=None, app_data=None):
+        """Persist public announce observations without acting on them."""
         try:
             import RNS, LXMF
             destination = destination_hash.hex() if hasattr(destination_hash, "hex") else str(destination_hash)
-            if not DESTINATION_RE.fullmatch(destination): return
-            self.state["lxmf_delivery_announces_observed"] += 1
+            if aspect not in APPLICATION_ASPECTS or not DESTINATION_RE.fullmatch(destination): return
+            destination = destination.lower()
+            self.state["application_announces_observed"] += 1
+            self.state["application_announce_counts"][aspect] += 1
             identity = getattr(announced_identity, "hash", None)
             identity_hash = identity.hex().lower() if hasattr(identity, "hex") else None
-            try: display_name = LXMF.display_name_from_app_data(app_data)
-            except Exception: display_name = None
+            if aspect == "lxmf.delivery":
+                try: display_name = LXMF.display_name_from_app_data(app_data)
+                except Exception: display_name = None
+            elif aspect == "nomadnetwork.node":
+                try: display_name = self.nomad_name_from_app_data(app_data)
+                except (UnicodeDecodeError, AttributeError): display_name = None
+            else: display_name = None
             if not isinstance(display_name, str): display_name = None
             elif not display_name.strip(): display_name = None
             else: display_name = display_name.strip()[:80]
@@ -98,17 +122,22 @@ class Messaging:
             except Exception: hops = None
             stamp = int(time.time())
             with connect() as con:
-                con.execute("INSERT INTO announced_peers(destination_hash,identity_hash,display_name,first_seen,last_seen,last_hops,announce_count) VALUES(?,?,?,?,?,?,1) ON CONFLICT(destination_hash) DO UPDATE SET identity_hash=COALESCE(excluded.identity_hash,announced_peers.identity_hash),display_name=COALESCE(excluded.display_name,announced_peers.display_name),last_seen=excluded.last_seen,last_hops=excluded.last_hops,announce_count=announced_peers.announce_count+1", (destination.lower(), identity_hash, display_name, stamp, stamp, hops))
-            self.state["last_lxmf_delivery_announce"] = stamp
+                con.execute("INSERT INTO application_announces(destination_hash,aspect,identity_hash,display_name,first_seen,last_seen,last_hops,announce_count) VALUES(?,?,?,?,?,?,?,1) ON CONFLICT(destination_hash,aspect) DO UPDATE SET identity_hash=COALESCE(excluded.identity_hash,application_announces.identity_hash),display_name=COALESCE(excluded.display_name,application_announces.display_name),last_seen=excluded.last_seen,last_hops=excluded.last_hops,announce_count=application_announces.announce_count+1", (destination, aspect, identity_hash, display_name, stamp, stamp, hops))
+                if aspect == "lxmf.delivery":
+                    con.execute("INSERT INTO announced_peers(destination_hash,identity_hash,display_name,first_seen,last_seen,last_hops,announce_count) VALUES(?,?,?,?,?,?,1) ON CONFLICT(destination_hash) DO UPDATE SET identity_hash=COALESCE(excluded.identity_hash,announced_peers.identity_hash),display_name=COALESCE(excluded.display_name,announced_peers.display_name),last_seen=excluded.last_seen,last_hops=excluded.last_hops,announce_count=announced_peers.announce_count+1", (destination, identity_hash, display_name, stamp, stamp, hops))
+            self.state["last_application_announce"] = stamp
+            if aspect == "lxmf.delivery":
+                self.state["lxmf_delivery_announces_observed"] += 1; self.state["last_lxmf_delivery_announce"] = stamp
         except Exception:
             # Announces are advisory public metadata. A malformed announce must
             # never interrupt messaging or expose private diagnostic details.
             return
 
     def register_announce_listener(self, RNS):
-        """Register exactly one passive, documented LXMF delivery listener."""
-        self.announce_handler = LXMFDeliveryAnnounceHandler(self)
-        RNS.Transport.register_announce_handler(self.announce_handler)
+        """Register only passive handlers for documented public app announces."""
+        self.announce_handlers = [ApplicationAnnounceHandler(self, aspect) for aspect in APPLICATION_ASPECTS]
+        self.announce_handler = self.announce_handlers[0]
+        for handler in self.announce_handlers: RNS.Transport.register_announce_handler(handler)
 
     def update_outbound(self, message_id, delivery_state, error=None):
         """Persist an asynchronous LXMF result against its original request ID."""

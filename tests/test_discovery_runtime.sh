@@ -106,10 +106,20 @@ test "$messaging_destination_before" != "$bot_destination_after"
 # this verifies the actual image can persist public peer data without making
 # any connection or configuration action.
 grep -q '"announce_listener_registered": true' "$messaging_state/status.json"
+docker exec "$messaging_container" python -c "import types, messaging; handlers=[]; transport=types.SimpleNamespace(register_announce_handler=lambda handler: handlers.append(handler)); service=messaging.Messaging(); service.register_announce_listener(types.SimpleNamespace(Transport=transport)); assert {handler.aspect_filter for handler in handlers} == {'lxmf.delivery','lxmf.propagation','nomadnetwork.node'}"
 docker exec "$messaging_container" python -c "import types, messaging; messaging.Messaging().receive_announce(bytes.fromhex('abcdef0123456789abcdef0123456789'), types.SimpleNamespace(hash=bytes.fromhex('1234567890abcdef1234567890abcdef')), b'CI Announced Peer')"
 if ! wait_for 10 python3 -c "import sqlite3; row=sqlite3.connect('$messaging_state/messages.db').execute(\"select destination_hash,display_name,announce_count from announced_peers where destination_hash='abcdef0123456789abcdef0123456789'\").fetchone(); assert row and row[1] == 'CI Announced Peer' and row[2] == 1"; then
   docker logs "$messaging_container" >&2 || true
   echo "Messaging service did not persist an LXMF announce" >&2
+  exit 1
+fi
+# Application announce enrichment uses the same packaged Messaging image and
+# its persistent database. NomadNet documents its node name as raw UTF-8 app
+# data; propagation is recorded as a capability without inventing a name.
+docker exec "$messaging_container" python -c "import types, messaging; service=messaging.Messaging(); service.receive_application_announce('nomadnetwork.node', bytes.fromhex('11111111111111111111111111111111'), types.SimpleNamespace(hash=bytes.fromhex('22222222222222222222222222222222')), b'CI Nomad Node'); service.receive_application_announce('lxmf.propagation', bytes.fromhex('33333333333333333333333333333333'), None, b'not decoded')"
+if ! wait_for 10 python3 -c "import sqlite3; con=sqlite3.connect('$messaging_state/messages.db'); nomad=con.execute(\"select display_name,aspect from application_announces where destination_hash='11111111111111111111111111111111'\").fetchone(); propagation=con.execute(\"select display_name,aspect from application_announces where destination_hash='33333333333333333333333333333333'\").fetchone(); assert nomad == ('CI Nomad Node','nomadnetwork.node') and propagation == (None,'lxmf.propagation')"; then
+  docker logs "$messaging_container" >&2 || true
+  echo "Messaging service image did not persist passive application announces" >&2
   exit 1
 fi
 # Status exposes the passive listener's public-announcement observability
@@ -142,6 +152,7 @@ fi
 messaging_destination_after=$(python3 -c "import json; print(json.load(open('$messaging_state/status.json'))['destination'])")
 test "$messaging_destination_before" = "$messaging_destination_after"
 python3 -c "import sqlite3; row=sqlite3.connect('$messaging_state/messages.db').execute(\"select destination_hash from announced_peers where destination_hash='abcdef0123456789abcdef0123456789'\").fetchone(); assert row"
+python3 -c "import sqlite3; con=sqlite3.connect('$messaging_state/messages.db'); assert con.execute(\"select count(*) from application_announces where aspect in ('nomadnetwork.node','lxmf.propagation')\").fetchone()[0] == 2"
 if ! wait_for 15 python3 -c "import sqlite3; row=sqlite3.connect('$messaging_state/messages.db').execute(\"select delivery_state from messages where id='recovery-test'\").fetchone(); assert row and row[0] == 'Failed'"; then
   docker logs "$messaging_container" >&2 || true
   echo "Messaging service left interrupted outbound work stranded" >&2

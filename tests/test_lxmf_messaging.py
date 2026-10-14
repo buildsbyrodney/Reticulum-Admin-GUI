@@ -293,14 +293,48 @@ class MessagingServiceTests(unittest.TestCase):
         try:
             service = messaging.Messaging()
             service.register_announce_listener(sys.modules["RNS"])
-            self.assertEqual(len(registered), 1)
-            self.assertEqual(registered[0].aspect_filter, "lxmf.delivery")
+            self.assertEqual({handler.aspect_filter for handler in registered}, {"lxmf.delivery", "lxmf.propagation", "nomadnetwork.node"})
             registered[0].received_announce(bytes.fromhex("c" * 32), None, b"bad", None)
             with messaging.connect() as con:
                 row = con.execute("SELECT display_name,last_hops FROM announced_peers").fetchone()
             self.assertEqual(tuple(row), (None, None))
             self.assertIsNone(service.router)
             self.assertIsNone(service.destination)
+        finally:
+            if old_rns is None: sys.modules.pop("RNS", None)
+            else: sys.modules["RNS"] = old_rns
+            if old_lxmf is None: sys.modules.pop("LXMF", None)
+            else: sys.modules["LXMF"] = old_lxmf
+
+    def test_nomad_and_propagation_announces_are_passive_and_durable(self):
+        nomad, propagation = "e" * 32, "f" * 32
+        class Transport:
+            PATHFINDER_M = 99
+            @staticmethod
+            def hops_to(value): return 2 if value == bytes.fromhex(nomad) else 99
+        old_rns, old_lxmf = sys.modules.get("RNS"), sys.modules.get("LXMF")
+        sys.modules["RNS"] = types.SimpleNamespace(Transport=Transport)
+        sys.modules["LXMF"] = types.SimpleNamespace(display_name_from_app_data=lambda _: "LXMF Name")
+        try:
+            service = messaging.Messaging()
+            service.receive_application_announce("nomadnetwork.node", bytes.fromhex(nomad), None, b"Alabama Mesh Node")
+            service.receive_application_announce("lxmf.propagation", bytes.fromhex(propagation), None, b"not decoded")
+            # Bad UTF-8 remains a useful observation without inventing a name.
+            service.receive_application_announce("nomadnetwork.node", bytes.fromhex(nomad), None, b"\xff")
+            with messaging.connect() as con:
+                rows = {row["aspect"]: row for row in con.execute("SELECT * FROM application_announces WHERE destination_hash IN (?,?)", (nomad, propagation))}
+            self.assertEqual(rows["nomadnetwork.node"]["display_name"], "Alabama Mesh Node")
+            self.assertEqual(rows["nomadnetwork.node"]["last_hops"], 2)
+            self.assertEqual(rows["nomadnetwork.node"]["announce_count"], 2)
+            self.assertIsNone(rows["lxmf.propagation"]["display_name"])
+            self.assertIsNone(rows["lxmf.propagation"]["last_hops"])
+            self.assertIsNone(service.router); self.assertIsNone(service.destination)
+            service.status()
+            status = json.loads((messaging.STATE / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["application_announces_observed"], 3)
+            self.assertEqual(status["application_announce_counts"]["nomadnetwork.node"], 2)
+            self.assertEqual(status["application_announce_counts"]["lxmf.propagation"], 1)
+            self.assertEqual(status["unique_application_announce_destinations"], 2)
         finally:
             if old_rns is None: sys.modules.pop("RNS", None)
             else: sys.modules["RNS"] = old_rns
