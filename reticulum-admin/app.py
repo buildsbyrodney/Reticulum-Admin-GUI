@@ -216,6 +216,7 @@ def nomad_page(destination, path):
     rows = nomad_rows("SELECT * FROM pages WHERE destination_hash=? AND path=?", (destination.lower(), path))
     return rows[0] if rows else None
 def nomad_request(name, value): atomic_json(NOMAD_REQUEST_DIR / name, value)
+def nomad_identify_requested(value): return str(value or "").lower() in ("1", "true", "on", "yes")
 
 def csrf_token():
     session.setdefault("csrf", secrets.token_urlsafe(32)); return session["csrf"]
@@ -1199,20 +1200,24 @@ def topology_graph_api():
 def nomad_browser():
     destination = request.args.get("destination", "").lower()
     path = request.args.get("path", NOMAD_DEFAULT_PATH).strip() or NOMAD_DEFAULT_PATH
+    request_id = request.args.get("request_id", "").strip()
+    identify = nomad_identify_requested(request.args.get("identify"))
     if request.method == "POST":
         require_csrf()
         destination = request.form.get("destination", "").lower()
         path = request.form.get("path", NOMAD_DEFAULT_PATH).strip() or NOMAD_DEFAULT_PATH
+        identify = nomad_identify_requested(request.form.get("identify"))
         if not valid_destination(destination) or not valid_nomad_page_path(path):
             flash("Enter a known 32-character Nomad destination and a safe /page/ path.", "error")
         else:
-            nomad_request(f"browse-{uuid.uuid4().hex}.json", {"id": uuid.uuid4().hex, "destination": destination, "path": path})
+            request_id = uuid.uuid4().hex
+            nomad_request(f"browse-{request_id}.json", {"id": request_id, "destination": destination, "path": path, "identify": identify})
             flash("Nomad page request queued. The browser will update when the node responds.", "success")
-        return redirect(url_for("nomad_browser", destination=destination, path=path))
+        return redirect(url_for("nomad_browser", destination=destination, path=path, request_id=request_id or None, identify="1" if identify else None))
     if not valid_nomad_page_path(path): path = NOMAD_DEFAULT_PATH
     observations = messaging_application_announces()
     nodes = [row for row in observations if row.get("aspect") == "nomadnetwork.node"]
-    return render_template("nomad.html", title="Nomad Browser", destination=destination if valid_destination(destination) else "", path=path, page=nomad_page(destination, path) if valid_destination(destination) else None, nodes=nodes, status=nomad_status(), short_destination=short_destination)
+    return render_template("nomad.html", title="Nomad Browser", destination=destination if valid_destination(destination) else "", path=path, page=nomad_page(destination, path) if valid_destination(destination) else None, request_id=request_id, identify=identify, nodes=nodes, status=nomad_status(), short_destination=short_destination)
 
 @app.get("/nomad/api/pages/<destination>")
 @login_required
