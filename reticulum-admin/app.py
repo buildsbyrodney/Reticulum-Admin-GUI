@@ -10,6 +10,7 @@ import urllib.request
 import socket
 import platform
 import time
+import uuid
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -27,6 +28,8 @@ BOT_STATUS_DIR = Path(os.environ.get("BOT_STATUS_DIR", "/bot-status"))
 BOT_CONFIG_DIR = Path(os.environ.get("BOT_CONFIG_DIR", "/bot-config"))
 MESSAGING_DIR = Path(os.environ.get("MESSAGING_DIR", "/messaging"))
 MESSAGING_REQUEST_DIR = Path(os.environ.get("MESSAGING_REQUEST_DIR", "/messaging-requests"))
+NOMAD_DIR = Path(os.environ.get("NOMAD_DIR", "/nomad"))
+NOMAD_REQUEST_DIR = Path(os.environ.get("NOMAD_REQUEST_DIR", "/nomad-requests"))
 TIMEZONE_NAME = os.environ.get("SERVER_TIMEZONE", "America/Chicago")
 try:
     SERVER_TIMEZONE = ZoneInfo(TIMEZONE_NAME)
@@ -190,6 +193,29 @@ def messaging_workspace(tab="conversations", selected=None, search=""):
     return {"tab": tab, "search": search, "conversations": conversations, "peers": peers, "selected": selected, "rows": messages, "contact": contact_rows[0] if contact_rows else None, "peer": peer, "status": messaging_status(), "short_destination": short_destination}
 def valid_destination(value): return bool(re.fullmatch(r"[0-9a-fA-F]{32}", value or ""))
 def messaging_request(name, value): atomic_json(MESSAGING_REQUEST_DIR / name, value)
+
+# Nomad page records are owned exclusively by nomad-browser. The web process
+# opens the database read-only and asks the service to fetch through a narrow
+# request file, preserving the same boundary used for Messaging.
+NOMAD_DEFAULT_PATH = "/page/index.mu"
+def valid_nomad_page_path(value):
+    return bool(isinstance(value, str) and value.startswith("/page/") and len(value) <= 200
+                and ".." not in value and "\\" not in value and "\x00" not in value)
+def nomad_con():
+    return sqlite3.connect(f"file:{NOMAD_DIR / 'nomad.db'}?mode=ro", uri=True, timeout=2)
+def nomad_rows(query, values=()):
+    try:
+        with nomad_con() as con:
+            con.row_factory = sqlite3.Row
+            return [dict(row) for row in con.execute(query, values).fetchall()]
+    except sqlite3.Error: return []
+def nomad_status():
+    try: return json.loads((NOMAD_DIR / "status.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError): return {"running": False, "shared_instance_connected": False, "error": "Nomad Browser has not reported status yet."}
+def nomad_page(destination, path):
+    rows = nomad_rows("SELECT * FROM pages WHERE destination_hash=? AND path=?", (destination.lower(), path))
+    return rows[0] if rows else None
+def nomad_request(name, value): atomic_json(NOMAD_REQUEST_DIR / name, value)
 
 def csrf_token():
     session.setdefault("csrf", secrets.token_urlsafe(32)); return session["csrf"]
@@ -669,8 +695,10 @@ def network_map_model():
         if "nomadnetwork.node" in aspects: capabilities.append("nomadnetwork_node")
         peer_node["capabilities"] = capabilities
         if "nomadnetwork.node" in aspects:
-            # A Nomad viewer is a future feature. Until then its generic Paths
-            # fallback remains useful; never discard a more useful route.
+            # Nomad browsing is read-only. LXMF remains the primary action
+            # whenever this same destination also has delivery capability.
+            if "lxmf.delivery" not in aspects:
+                peer_node["route"] = "/nomad?destination=" + destination
             add_edge("service:messaging", peer_node["id"], "nomad_announce", "Passive NomadNet node announce observed by Messaging")
         if "lxmf.propagation" in aspects:
             add_edge("service:messaging", peer_node["id"], "lxmf_propagation", "Passive LXMF propagation announce observed by Messaging")
@@ -1165,6 +1193,37 @@ def topology():
 def topology_graph_api():
     """Narrow, authenticated observation endpoint. It never changes runtime state."""
     return jsonify(network_map_model())
+
+@app.route("/nomad", methods=["GET", "POST"])
+@login_required
+def nomad_browser():
+    destination = request.args.get("destination", "").lower()
+    path = request.args.get("path", NOMAD_DEFAULT_PATH).strip() or NOMAD_DEFAULT_PATH
+    if request.method == "POST":
+        require_csrf()
+        destination = request.form.get("destination", "").lower()
+        path = request.form.get("path", NOMAD_DEFAULT_PATH).strip() or NOMAD_DEFAULT_PATH
+        if not valid_destination(destination) or not valid_nomad_page_path(path):
+            flash("Enter a known 32-character Nomad destination and a safe /page/ path.", "error")
+        else:
+            nomad_request(f"browse-{uuid.uuid4().hex}.json", {"id": uuid.uuid4().hex, "destination": destination, "path": path})
+            flash("Nomad page request queued. The browser will update when the node responds.", "success")
+        return redirect(url_for("nomad_browser", destination=destination, path=path))
+    if not valid_nomad_page_path(path): path = NOMAD_DEFAULT_PATH
+    observations = messaging_application_announces()
+    nodes = [row for row in observations if row.get("aspect") == "nomadnetwork.node"]
+    return render_template("nomad.html", title="Nomad Browser", destination=destination if valid_destination(destination) else "", path=path, page=nomad_page(destination, path) if valid_destination(destination) else None, nodes=nodes, status=nomad_status(), short_destination=short_destination)
+
+@app.get("/nomad/api/pages/<destination>")
+@login_required
+def nomad_page_api(destination):
+    if not valid_destination(destination): abort(404)
+    path = request.args.get("path", NOMAD_DEFAULT_PATH).strip() or NOMAD_DEFAULT_PATH
+    if not valid_nomad_page_path(path): abort(400)
+    page = nomad_page(destination, path)
+    # Public remote page bodies are returned only to the authenticated browser
+    # that selected this node. They are not copied into Timeline or logs.
+    return jsonify({"destination": destination.lower(), "path": path, "page": page, "status": nomad_status()})
 
 @app.route("/discovery", methods=["GET", "POST"])
 @login_required

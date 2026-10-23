@@ -132,7 +132,7 @@ class NetworkMapTests(unittest.TestCase):
         ]
         nodes = {node["id"]: node for node in self.web.network_map_model()["nodes"]}
         self.assertEqual(nodes["peer:" + lxmf]["route"], "/messaging/conversations/" + lxmf + "?tab=announces")
-        self.assertEqual(nodes["peer:" + nomad]["route"], "/paths?q=" + nomad)
+        self.assertEqual(nodes["peer:" + nomad]["route"], "/nomad?destination=" + nomad)
         self.assertEqual(nodes["peer:" + propagation]["route"], "/paths?q=" + propagation)
 
     def test_api_requires_login_and_authenticated_result_has_no_controls(self):
