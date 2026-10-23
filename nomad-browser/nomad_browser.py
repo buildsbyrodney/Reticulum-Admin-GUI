@@ -88,6 +88,7 @@ class NomadBrowser:
         """
         if self.identity:
             return self.identity
+        STATE.mkdir(parents=True, exist_ok=True)
         identity_path = STATE / IDENTITY_FILE
         self.identity = RNS.Identity.from_file(str(identity_path)) if identity_path.exists() else RNS.Identity()
         if not identity_path.exists():
