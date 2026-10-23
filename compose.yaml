@@ -81,6 +81,8 @@ services:
       - ./data/bot-config:/bot-config
       - ./data/messaging:/messaging:ro
       - ./data/messaging-requests:/messaging-requests
+      - ./data/nomad:/nomad:ro
+      - ./data/nomad-requests:/nomad-requests
     networks: [default, management]
 
   lxmf-test-bot:
@@ -121,6 +123,24 @@ services:
       - ./data/reticulum:/reticulum:ro
       - ./data/messaging:/messaging
       - ./data/messaging-requests:/requests
+
+  nomad-browser:
+    build: ./nomad-browser
+    restart: unless-stopped
+    depends_on:
+      rnsd:
+        condition: service_started
+    # Nomad pages use Reticulum Link requests. Like the Messaging and Bot
+    # clients, this has host networking solely to attach to the existing local
+    # shared instance; it publishes no ports and cannot run its own master.
+    network_mode: host
+    environment:
+      NOMAD_STATE_DIR: /nomad
+      NOMAD_REQUEST_DIR: /requests
+    volumes:
+      - ./data/reticulum:/reticulum:ro
+      - ./data/nomad:/nomad
+      - ./data/nomad-requests:/requests
 
 networks:
   management:

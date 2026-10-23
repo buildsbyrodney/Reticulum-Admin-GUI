@@ -14,7 +14,7 @@ fi
 
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
-for item in VERSION README.md compose.yaml install.sh .env.example rnsd reticulum-admin management-agent lxmf-test-bot lxmf-messaging scripts tests; do
+for item in VERSION README.md compose.yaml install.sh .env.example rnsd reticulum-admin management-agent lxmf-test-bot lxmf-messaging nomad-browser scripts tests; do
   [ -e "$ROOT/$item" ] && cp -a "$ROOT/$item" "$STAGE/"
 done
 find "$STAGE" -type d \( -name __pycache__ -o -name .pytest_cache -o -name data -o -name logs -o -name release \) -prune -exec rm -rf {} +

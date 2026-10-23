@@ -7,11 +7,13 @@ rnsd_image="reticulum-admin-rnsd-discovery-test:$$"
 agent_image="reticulum-admin-agent-discovery-test:$$"
 bot_image="reticulum-admin-bot-discovery-test:$$"
 messaging_image="reticulum-admin-messaging-discovery-test:$$"
+nomad_image="reticulum-admin-nomad-browser-discovery-test:$$"
 missing_image="reticulum-admin-rnsd-no-lxmf-test:$$"
 rnsd_container="reticulum-admin-rnsd-discovery-test-$$"
 agent_container="reticulum-admin-agent-discovery-test-$$"
 bot_container="reticulum-admin-bot-discovery-test-$$"
 messaging_container="reticulum-admin-messaging-discovery-test-$$"
+nomad_container="reticulum-admin-nomad-browser-discovery-test-$$"
 missing_container="reticulum-admin-rnsd-no-lxmf-test-$$"
 state=$(mktemp -d)
 missing_state=$(mktemp -d)
@@ -20,12 +22,14 @@ bot_status=$(mktemp -d)
 bot_config=$(mktemp -d)
 messaging_state=$(mktemp -d)
 messaging_requests=$(mktemp -d)
+nomad_state=$(mktemp -d)
+nomad_requests=$(mktemp -d)
 port=18081
 cleanup() {
-  docker rm -f "$missing_container" "$messaging_container" "$bot_container" "$agent_container" "$rnsd_container" >/dev/null 2>&1 || true
+  docker rm -f "$missing_container" "$nomad_container" "$messaging_container" "$bot_container" "$agent_container" "$rnsd_container" >/dev/null 2>&1 || true
   # Containers run as root and own files beneath these test mounts. The hosted
   # runner is ephemeral, so cleanup must not turn a passing test into failure.
-  rm -rf "$state" "$missing_state" "$bot_state" "$bot_status" "$bot_config" "$messaging_state" "$messaging_requests" || true
+  rm -rf "$state" "$missing_state" "$bot_state" "$bot_status" "$bot_config" "$messaging_state" "$messaging_requests" "$nomad_state" "$nomad_requests" || true
 }
 trap cleanup EXIT INT TERM
 
@@ -45,6 +49,7 @@ docker build -t "$rnsd_image" ./rnsd >/dev/null
 docker build -t "$agent_image" ./management-agent >/dev/null
 docker build -t "$bot_image" ./lxmf-test-bot >/dev/null
 docker build -t "$messaging_image" ./lxmf-messaging >/dev/null
+docker build -t "$nomad_image" ./nomad-browser >/dev/null
 
 # Baseline: Discovery disabled must retain ordinary rnsd startup behavior.
 docker run -d --name "$rnsd_container" --network host -v "$state:/root/.reticulum" "$rnsd_image" >/dev/null
@@ -165,6 +170,20 @@ if ! wait_for 10 python3 -c "import os, sqlite3; row=sqlite3.connect('$messaging
   exit 1
 fi
 docker exec "$rnsd_container" rnstatus --config /root/.reticulum | grep -Eq 'Serving[[:space:]]*:[[:space:]]*2 programs'
+
+# The packaged Nomad browser is a third, read-only shared-instance client. It
+# has its own cache/request storage, no identity or management authority, and
+# must not create another Reticulum master.
+docker run -d --name "$nomad_container" --network host \
+  -e NOMAD_STATE_DIR=/nomad -e NOMAD_REQUEST_DIR=/requests \
+  -v "$state:/reticulum:ro" -v "$nomad_state:/nomad" -v "$nomad_requests:/requests" "$nomad_image" >/dev/null
+if ! wait_for 35 sh -c "test -s '$nomad_state/status.json' && grep -q '\"running\": true' '$nomad_state/status.json'"; then
+  docker logs "$nomad_container" >&2 || true
+  echo "Nomad Browser did not attach to the rnsd shared instance" >&2
+  exit 1
+fi
+docker exec "$nomad_container" python -c 'import nomad_browser; assert nomad_browser.DEFAULT_PATH == "/page/index.mu"; assert nomad_browser.valid_page_path("/page/index.mu"); assert not nomad_browser.valid_page_path("/file/secret")'
+grep -q '"mode": "Read-only Nomad page browser"' "$nomad_state/status.json"
 
 # Actual management image applies the same config path the GUI uses. The rnsd
 # image then restarts, creates generation N+1, and the observer verifies the

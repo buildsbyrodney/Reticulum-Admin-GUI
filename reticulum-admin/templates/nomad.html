@@ -1,0 +1,49 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="nomad-page" data-page-api="{{ url_for('nomad_page_api', destination=destination) if destination else '' }}" data-page-path="{{ path }}">
+  <div class="page-actions"><div><h1>Nomad Browser</h1><p>Read a public NomadNet page through the managed Reticulum shared instance. This browser does not host pages, execute remote content, download files, or change Reticulum settings.</p></div></div>
+  <p>Status: <strong>{{ 'Ready' if status.running else 'Waiting for Reticulum' }}</strong> · Shared instance: {{ 'Connected' if status.shared_instance_connected else 'Waiting' }} · Cached pages: {{ status.page_cache_count or 0 }}</p>
+  <div class="nomad-layout">
+    <aside class="card nomad-nodes"><h2>Observed Nomad nodes</h2>
+      {% if nodes %}<ul>{% for node in nodes %}<li><a href="{{ url_for('nomad_browser', destination=node.destination_hash) }}">{{ node.contact_name or node.display_name or short_destination(node.destination_hash) }}</a><br><small><code>{{ short_destination(node.destination_hash) }}</code> · {{ format_time(node.last_seen) }}</small></li>{% endfor %}</ul>{% else %}<p class="muted">No NomadNet node announces have been observed yet.</p>{% endif %}
+      <p class="muted">Node names are public announce metadata, not proof of identity.</p>
+    </aside>
+    <div class="nomad-content card">
+      <h2>{{ 'Browse node' if destination else 'Choose a node' }}</h2>
+      <form method="post" class="inline nomad-request"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><label>Destination <input name="destination" value="{{ destination }}" maxlength="32" pattern="[0-9a-fA-F]{32}" required></label><label>Page path <input name="path" value="{{ path }}" maxlength="200" required></label><button>Load page</button></form>
+      {% if destination %}<p><strong>{{ short_destination(destination) }}</strong> · <code>{{ destination }}</code></p>{% endif %}
+      <div id="nomad-page-result" class="nomad-page-result" aria-live="polite">
+      {% if page and page.state == 'Ready' %}
+        <p class="muted">Fetched {{ format_time(page.fetched_at) }}. Nomad Micron is shown as plain text in this first read-only release; remote markup and scripts are never executed.</p><pre>{{ page.page_text }}</pre>
+      {% elif page and page.state == 'Failed' %}
+        <p class="error">{{ page.error }}</p>
+      {% elif page %}
+        <p>Loading page…</p>
+      {% elif destination %}
+        <p class="muted">Choose Load page to request <code>{{ path }}</code>.</p>
+      {% else %}
+        <p class="muted">Choose an observed Nomad node or enter a 32-character destination hash.</p>
+      {% endif %}
+      </div>
+    </div>
+  </div>
+</section>
+<script>
+(() => {
+  const page = document.querySelector('.nomad-page'), result = document.getElementById('nomad-page-result');
+  if (!page || !result || !page.dataset.pageApi || !window.fetch) return;
+  function escapeHtml(value) { const element=document.createElement('div'); element.textContent=value || ''; return element.innerHTML; }
+  async function refresh() {
+    try {
+      const response=await fetch(page.dataset.pageApi+'?path='+encodeURIComponent(page.dataset.pagePath), {credentials:'same-origin', cache:'no-store'});
+      if (!response.ok) return;
+      const data=await response.json(), record=data.page;
+      if (!record || record.state === 'Pending') { window.setTimeout(refresh, 1500); return; }
+      if (record.state === 'Ready') result.innerHTML='<p class="muted">Fetched page. Remote Micron markup and scripts are displayed safely as text.</p><pre>'+escapeHtml(record.page_text)+'</pre>';
+      else result.innerHTML='<p class="error">'+escapeHtml(record.error || 'Nomad page request failed.')+'</p>';
+    } catch (_) { window.setTimeout(refresh, 3000); }
+  }
+  if (result.textContent.includes('Loading page')) refresh();
+})();
+</script>
+{% endblock %}
