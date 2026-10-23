@@ -184,6 +184,8 @@ if ! wait_for 35 sh -c "test -s '$nomad_state/status.json' && grep -q '\"running
 fi
 docker exec "$nomad_container" python -c 'import nomad_browser; assert nomad_browser.DEFAULT_PATH == "/page/index.mu"; assert nomad_browser.valid_page_path("/page/index.mu"); assert not nomad_browser.valid_page_path("/file/secret")'
 grep -q '"mode": "Read-only Nomad page browser"' "$nomad_state/status.json"
+python3 -c "import json; status=json.load(open('$nomad_state/status.json')); assert status['identity_loaded'] is True and len(status['identity']) == 32"
+test -s "$nomad_state/identity"
 
 # Actual management image applies the same config path the GUI uses. The rnsd
 # image then restarts, creates generation N+1, and the observer verifies the
