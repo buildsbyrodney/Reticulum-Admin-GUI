@@ -215,8 +215,27 @@ class Messaging:
         except Exception:
             self.update_outbound(message_id, "Failed", "LXMF submission failed.")
         return True
-    def process_requests(self):
+    def process_announce_clear_requests(self):
+        """Process the safe local-history clear even when messaging is disabled."""
         REQUESTS.mkdir(parents=True, exist_ok=True)
+        # This deliberately clears only public, locally observed announce
+        # metadata. It is processed here rather than by the web application so
+        # Messaging remains the sole SQLite writer. Replaying the request is
+        # harmless: both deletes are idempotent.
+        for request in sorted(REQUESTS.glob("clear-announces-*.json")):
+            try:
+                item = json.loads(request.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if item.get("action") != "clear_observed_announces" or not isinstance(item.get("id"), str):
+                continue
+            with connect() as con:
+                con.execute("DELETE FROM announced_peers")
+                con.execute("DELETE FROM application_announces")
+            request.unlink(missing_ok=True)
+
+    def process_requests(self):
+        self.process_announce_clear_requests()
         for request in sorted(REQUESTS.glob("outbound-*.json")):
             try: item = json.loads(request.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError): continue
@@ -264,6 +283,10 @@ class Messaging:
                     self.recover_interrupted_outbound(); recovery_attempted = True
                 if current_settings["enabled"] and current_settings["announce_on_startup"] and not announced: self.announce(); announced = True; last_periodic = current
                 if current_settings["enabled"] and current_settings["periodic_announce"] and current-last_periodic >= current_settings["interval_minutes"]*60: self.announce(); last_periodic = current
+                # Clearing locally retained public observations does not send
+                # or receive LXMF traffic, so it remains available even when
+                # the operator has disabled Messaging.
+                self.process_announce_clear_requests()
                 if current_settings["enabled"]: self.process_requests()
                 self.status(True); time.sleep(2)
             except Exception: self.state["last_error"] = "Messaging runtime error"; self.status(False); time.sleep(5)

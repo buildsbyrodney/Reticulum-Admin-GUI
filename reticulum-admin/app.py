@@ -1195,6 +1195,21 @@ def topology_graph_api():
     """Narrow, authenticated observation endpoint. It never changes runtime state."""
     return jsonify(network_map_model())
 
+@app.post("/topology/clear-announces")
+@login_required
+def topology_clear_announces():
+    """Ask Messaging to remove only its locally observed public announce history."""
+    require_csrf()
+    if request.form.get("confirmation", "").strip() != "CLEAR ANNOUNCES":
+        flash("Type CLEAR ANNOUNCES to confirm clearing observed announce history.", "error")
+        return redirect(url_for("topology"))
+    request_id = uuid.uuid4().hex
+    # Flask intentionally writes a narrow durable request, never Messaging's
+    # SQLite database. The Messaging service executes the idempotent clear.
+    messaging_request(f"clear-announces-{request_id}.json", {"id": request_id, "action": "clear_observed_announces"})
+    flash("Observed announce history is being cleared. Paths, messages, contacts, identities, and Reticulum configuration are unchanged; new announcements will appear as they are received.", "success")
+    return redirect(url_for("topology"))
+
 @app.route("/nomad", methods=["GET", "POST"])
 @login_required
 def nomad_browser():

@@ -171,6 +171,17 @@ if ! wait_for 10 python3 -c "import os, sqlite3; row=sqlite3.connect('$messaging
 fi
 docker exec "$rnsd_container" rnstatus --config /root/.reticulum | grep -Eq 'Serving[[:space:]]*:[[:space:]]*2 programs'
 
+# The packaged Messaging service is the only writer of its SQLite database.
+# A narrow durable request clears only passive public announce observations;
+# it leaves private messages and the persistent Messaging identity intact and
+# does not require a Docker or Reticulum restart.
+printf '%s' '{"id":"actual-clear-announces","action":"clear_observed_announces"}' > "$messaging_requests/clear-announces-actual.json"
+if ! wait_for 10 python3 -c "import os, sqlite3; con=sqlite3.connect('$messaging_state/messages.db'); assert con.execute('select count(*) from announced_peers').fetchone()[0] == 0; assert con.execute('select count(*) from application_announces').fetchone()[0] == 0; assert not os.path.exists('$messaging_requests/clear-announces-actual.json'); assert con.execute(\"select count(*) from messages where id='outbound-test'\").fetchone()[0] == 1"; then
+  docker logs "$messaging_container" >&2 || true
+  echo "Messaging service did not safely clear observed announce history" >&2
+  exit 1
+fi
+
 # The packaged Nomad browser is a third, read-only shared-instance client. It
 # has its own cache/request storage, no identity or management authority, and
 # must not create another Reticulum master.

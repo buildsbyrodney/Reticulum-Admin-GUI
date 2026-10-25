@@ -35,6 +35,27 @@ class MessagingServiceTests(unittest.TestCase):
             self.assertIsNotNone(con.execute("SELECT read_at FROM messages WHERE id='m'").fetchone()[0]); self.assertEqual(con.execute("SELECT name FROM contacts").fetchone()[0], "Alice")
         messaging.atomic_json(messaging.REQUESTS / "contact-delete-test.json", {"destination": key}); service.process_requests()
         with messaging.connect() as con: self.assertIsNone(con.execute("SELECT * FROM contacts").fetchone())
+
+    def test_clear_observed_announce_history_is_service_owned_and_preserves_messages_contacts(self):
+        service, destination = messaging.Messaging(), "a" * 32
+        with messaging.connect() as con:
+            con.execute("INSERT INTO announced_peers(destination_hash,identity_hash,display_name,message_display_name,first_seen,last_seen,last_hops,announce_count) VALUES(?,?,?,?,?,?,?,?)", (destination, None, "Observed peer", "Message name", 1, 2, 3, 4))
+            con.execute("INSERT INTO application_announces(destination_hash,aspect,identity_hash,display_name,first_seen,last_seen,last_hops,announce_count) VALUES(?,?,?,?,?,?,?,?)", (destination, "nomadnetwork.node", None, "Observed node", 1, 2, 3, 4))
+            con.execute("INSERT INTO contacts(name,destination,notes,created_at,updated_at) VALUES(?,?,?,?,?)", ("Kept contact", destination, None, 1, 1))
+            con.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", ("kept-message", destination, "inbound", destination, "b" * 32, None, "private message", 1, None, "Received", None, 1, 1))
+        request = messaging.REQUESTS / "clear-announces-test.json"
+        messaging.atomic_json(request, {"id": "clear-test", "action": "clear_observed_announces"})
+        service.process_requests()
+        with messaging.connect() as con:
+            self.assertEqual(con.execute("SELECT count(*) FROM announced_peers").fetchone()[0], 0)
+            self.assertEqual(con.execute("SELECT count(*) FROM application_announces").fetchone()[0], 0)
+            self.assertEqual(con.execute("SELECT count(*) FROM contacts").fetchone()[0], 1)
+            self.assertEqual(con.execute("SELECT count(*) FROM messages").fetchone()[0], 1)
+        self.assertFalse(request.exists())
+        # A replay after an interruption is harmless and cannot erase messages.
+        messaging.atomic_json(request, {"id": "clear-test", "action": "clear_observed_announces"})
+        service.process_requests()
+        with messaging.connect() as con: self.assertEqual(con.execute("SELECT count(*) FROM messages").fetchone()[0], 1)
     def test_outbound_request_is_persisted_before_request_is_deleted_and_replay_is_idempotent(self):
         service = messaging.Messaging(); service.destination = types.SimpleNamespace(hash=b"operator"); service.router = types.SimpleNamespace(handle_outbound=lambda _: None)
         target = "c" * 32
