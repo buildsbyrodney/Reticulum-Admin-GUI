@@ -167,6 +167,18 @@ class NomadBrowserWebTests(unittest.TestCase):
         self.assertIn("Nomad Browser", page)
         self.assertIn("&lt;b&gt;safe text&lt;/b&gt;", page)
         self.assertIn("Nomad Browser", (ROOT / "reticulum-admin" / "templates" / "base.html").read_text(encoding="utf-8"))
+        self.assertIn("Nomad address", page)
+        self.assertIn("safePath", page)
+        self.assertIn("document.createElement", page)
+        self.assertNotIn("Add Files", page)
+
+    def test_compact_nomad_address_is_exact_and_safe(self):
+        address = self.destination.upper() + ":/page/index.mu"
+        self.assertEqual(self.web.parse_nomad_address(address), (self.destination, "/page/index.mu"))
+        page = self.client().get("/nomad?address=" + address).get_data(as_text=True)
+        self.assertIn(self.destination + ":/page/index.mu", page)
+        for invalid in ("/page/index.mu", self.destination + ":/file/secret", self.destination + ":/page/../secret", "z" * 32 + ":/page/index.mu"):
+            self.assertIsNone(self.web.parse_nomad_address(invalid))
 
     def test_identify_option_is_compact_on_desktop_and_full_width_on_mobile(self):
         css = (ROOT / "reticulum-admin" / "static" / "app.css").read_text(encoding="utf-8")
@@ -175,7 +187,8 @@ class NomadBrowserWebTests(unittest.TestCase):
 
     def test_browse_post_only_creates_narrow_request_file_and_marks_live_request(self):
         root = Path(os.environ["NOMAD_REQUEST_DIR"])
-        response = self.client().post("/nomad", data={"csrf_token": "csrf", "destination": self.destination, "path": "/page/index.mu", "identify": "1"})
+        address = self.destination + ":/page/index.mu"
+        response = self.client().post("/nomad", data={"csrf_token": "csrf", "address": address, "identify": "1"})
         self.assertEqual(response.status_code, 302)
         requests = list(root.glob("browse-*.json")); self.assertEqual(len(requests), 1)
         value = json.loads(requests[0].read_text(encoding="utf-8"))

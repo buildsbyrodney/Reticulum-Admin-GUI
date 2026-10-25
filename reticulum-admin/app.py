@@ -213,6 +213,17 @@ NOMAD_DEFAULT_PATH = "/page/index.mu"
 def valid_nomad_page_path(value):
     return bool(isinstance(value, str) and value.startswith("/page/") and len(value) <= 200
                 and ".." not in value and "\\" not in value and "\x00" not in value)
+def parse_nomad_address(value):
+    """Parse NomadNet's compact ``destination:/page/...`` browser address.
+
+    This is deliberately not a general URL parser: only an exact Reticulum
+    destination and one safe Nomad page path are accepted.
+    """
+    if not isinstance(value, str): return None
+    match = re.fullmatch(r"([0-9a-fA-F]{32}):(/page/[^\s]{1,194})", value.strip())
+    if not match: return None
+    destination, path = match.group(1).lower(), match.group(2)
+    return (destination, path) if valid_nomad_page_path(path) else None
 def nomad_con():
     return sqlite3.connect(f"file:{NOMAD_DIR / 'nomad.db'}?mode=ro", uri=True, timeout=2)
 def nomad_rows(query, values=()):
@@ -1228,15 +1239,20 @@ def topology_clear_announces():
 def nomad_browser():
     destination = request.args.get("destination", "").lower()
     path = request.args.get("path", NOMAD_DEFAULT_PATH).strip() or NOMAD_DEFAULT_PATH
+    address = request.args.get("address", "").strip()
+    parsed_address = parse_nomad_address(address)
+    if parsed_address: destination, path = parsed_address
     request_id = request.args.get("request_id", "").strip()
     identify = nomad_identify_requested(request.args.get("identify"))
     if request.method == "POST":
         require_csrf()
-        destination = request.form.get("destination", "").lower()
-        path = request.form.get("path", NOMAD_DEFAULT_PATH).strip() or NOMAD_DEFAULT_PATH
+        address = request.form.get("address", "").strip()
+        parsed_address = parse_nomad_address(address) if address else None
+        destination = parsed_address[0] if parsed_address else request.form.get("destination", "").lower()
+        path = parsed_address[1] if parsed_address else (request.form.get("path", NOMAD_DEFAULT_PATH).strip() or NOMAD_DEFAULT_PATH)
         identify = nomad_identify_requested(request.form.get("identify"))
-        if not valid_destination(destination) or not valid_nomad_page_path(path):
-            flash("Enter a known 32-character Nomad destination and a safe /page/ path.", "error")
+        if (address and not parsed_address) or not valid_destination(destination) or not valid_nomad_page_path(path):
+            flash("Enter a Nomad address like destination:/page/index.mu, or a known 32-character destination and safe /page/ path.", "error")
         else:
             request_id = uuid.uuid4().hex
             nomad_request(f"browse-{request_id}.json", {"id": request_id, "destination": destination, "path": path, "identify": identify})
@@ -1245,7 +1261,10 @@ def nomad_browser():
     if not valid_nomad_page_path(path): path = NOMAD_DEFAULT_PATH
     observations = messaging_application_announces()
     nodes = [row for row in observations if row.get("aspect") == "nomadnetwork.node"]
-    return render_template("nomad.html", title="Nomad Browser", destination=destination if valid_destination(destination) else "", path=path, page=nomad_page(destination, path) if valid_destination(destination) else None, request_id=request_id, identify=identify, nodes=nodes, status=nomad_status(), short_destination=short_destination)
+    destination = destination if valid_destination(destination) else ""
+    selected_node = next((node for node in nodes if node.get("destination_hash", "").lower() == destination), None)
+    selected_name = ((selected_node or {}).get("contact_name") or (selected_node or {}).get("display_name") or short_destination(destination)) if destination else ""
+    return render_template("nomad.html", title="Nomad Browser", destination=destination, path=path, address=(destination + ":" + path) if destination else address, page=nomad_page(destination, path) if destination else None, request_id=request_id, identify=identify, nodes=nodes, selected_node=selected_node, selected_name=selected_name, status=nomad_status(), short_destination=short_destination)
 
 @app.get("/nomad/api/pages/<destination>")
 @login_required
