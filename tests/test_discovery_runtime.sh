@@ -24,12 +24,14 @@ messaging_state=$(mktemp -d)
 messaging_requests=$(mktemp -d)
 nomad_state=$(mktemp -d)
 nomad_requests=$(mktemp -d)
+nomad_resources=$(mktemp -d)
+nomad_ratchets=$(mktemp -d)
 port=18081
 cleanup() {
   docker rm -f "$missing_container" "$nomad_container" "$messaging_container" "$bot_container" "$agent_container" "$rnsd_container" >/dev/null 2>&1 || true
   # Containers run as root and own files beneath these test mounts. The hosted
   # runner is ephemeral, so cleanup must not turn a passing test into failure.
-  rm -rf "$state" "$missing_state" "$bot_state" "$bot_status" "$bot_config" "$messaging_state" "$messaging_requests" "$nomad_state" "$nomad_requests" || true
+  rm -rf "$state" "$missing_state" "$bot_state" "$bot_status" "$bot_config" "$messaging_state" "$messaging_requests" "$nomad_state" "$nomad_requests" "$nomad_resources" "$nomad_ratchets" || true
 }
 trap cleanup EXIT INT TERM
 
@@ -109,7 +111,9 @@ test -s "$messaging_state/webpush-vapid.pem"
 test "$(stat -c '%a' "$messaging_state/webpush-vapid.pem")" = "600"
 python3 -c "import json; value=json.load(open('$messaging_state/status.json')); encoded=json.dumps(value); assert value.get('web_push_public_key') and value.get('web_push_configured') and value.get('web_push_subject') == 'https://push.example' and 'webpush-vapid.pem' not in encoded and 'BEGIN PRIVATE' not in encoded"
 messaging_destination_before=$(python3 -c "import json; print(json.load(open('$messaging_state/status.json'))['destination'])")
-vapid_fingerprint_before=$(sha256sum "$messaging_state/webpush-vapid.pem" | awk '{print $1}')
+# The key is intentionally mode 0600 inside the service. Inspect it from the
+# owning container rather than relying on host bind-mount ownership details.
+vapid_fingerprint_before=$(docker exec "$messaging_container" sha256sum /messaging/webpush-vapid.pem | awk '{print $1}')
 test "$messaging_destination_before" != "$bot_destination_after"
 # The running service registers the passive lxmf.delivery listener. Inject a
 # supported-format display-name payload through the packaged service helper;
@@ -161,7 +165,7 @@ if ! wait_for 35 sh -c "test -s '$messaging_state/status.json' && grep -q '\"run
 fi
 messaging_destination_after=$(python3 -c "import json; print(json.load(open('$messaging_state/status.json'))['destination'])")
 test "$messaging_destination_before" = "$messaging_destination_after"
-test "$vapid_fingerprint_before" = "$(sha256sum "$messaging_state/webpush-vapid.pem" | awk '{print $1}')"
+test "$vapid_fingerprint_before" = "$(docker exec "$messaging_container" sha256sum /messaging/webpush-vapid.pem | awk '{print $1}')"
 python3 -c "import sqlite3; row=sqlite3.connect('$messaging_state/messages.db').execute(\"select destination_hash from announced_peers where destination_hash='abcdef0123456789abcdef0123456789'\").fetchone(); assert row"
 python3 -c "import sqlite3; con=sqlite3.connect('$messaging_state/messages.db'); assert con.execute(\"select count(*) from application_announces where aspect in ('nomadnetwork.node','lxmf.propagation')\").fetchone()[0] == 2"
 if ! wait_for 15 python3 -c "import sqlite3; row=sqlite3.connect('$messaging_state/messages.db').execute(\"select delivery_state from messages where id='recovery-test'\").fetchone(); assert row and row[0] == 'Failed'"; then
@@ -193,7 +197,10 @@ fi
 # must not create another Reticulum master.
 docker run -d --name "$nomad_container" --network host \
   -e NOMAD_STATE_DIR=/nomad -e NOMAD_REQUEST_DIR=/requests \
-  -v "$state:/reticulum:ro" -v "$nomad_state:/nomad" -v "$nomad_requests:/requests" "$nomad_image" >/dev/null
+  -v "$state:/reticulum:ro" \
+  -v "$nomad_resources:/reticulum/storage/resources" \
+  -v "$nomad_ratchets:/reticulum/storage/ratchets" \
+  -v "$nomad_state:/nomad" -v "$nomad_requests:/requests" "$nomad_image" >/dev/null
 if ! wait_for 35 sh -c "test -s '$nomad_state/status.json' && grep -q '\"running\": true' '$nomad_state/status.json'"; then
   docker logs "$nomad_container" >&2 || true
   echo "Nomad Browser did not attach to the rnsd shared instance" >&2
@@ -201,7 +208,7 @@ if ! wait_for 35 sh -c "test -s '$nomad_state/status.json' && grep -q '\"running
 fi
 docker exec "$nomad_container" python -c 'import nomad_browser; assert nomad_browser.DEFAULT_PATH == "/page/index.mu"; assert nomad_browser.valid_page_path("/page/index.mu"); assert not nomad_browser.valid_page_path("/file/secret")'
 grep -q '"mode": "Read-only Nomad page browser"' "$nomad_state/status.json"
-python3 -c "import json; status=json.load(open('$nomad_state/status.json')); assert status['identity_loaded'] is True and len(status['identity']) == 32"
+python3 -c "import json; status=json.load(open('$nomad_state/status.json')); assert status['identity_loaded'] is True and status['resource_storage_ready'] is True and len(status['identity']) == 32"
 test -s "$nomad_state/identity"
 
 # Actual management image applies the same config path the GUI uses. The rnsd
