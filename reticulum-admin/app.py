@@ -114,14 +114,26 @@ def bot_status():
     try: return json.loads((BOT_STATUS_DIR / "status.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError): return {"running": False, "shared_instance_connected": False, "lxmf_router_ready": False, "error": "Bot has not reported status yet."}
 
-MESSAGING_DEFAULTS = {"enabled": True, "display_name": "Reticulum Admin User", "announce_on_startup": True, "periodic_announce": False, "interval_minutes": 60}
+MESSAGING_DEFAULTS = {"enabled": True, "display_name": "Reticulum Admin User", "announce_on_startup": True, "periodic_announce": False, "interval_minutes": 60, "web_push_contact_url": ""}
 def messaging_status():
     try: return json.loads((MESSAGING_DIR / "status.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError): return {"running": False, "shared_instance_connected": False, "lxmf_router_ready": False, "error": "Messaging service has not reported status yet."}
-def messaging_settings():
+def messaging_settings_document():
+    """Read the narrow Messaging settings document without discarding future keys."""
     try: value = json.loads((MESSAGING_REQUEST_DIR / "settings.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError): value = {}
+    return value if isinstance(value, dict) else {}
+def messaging_settings():
+    value = messaging_settings_document()
     return {**MESSAGING_DEFAULTS, **{key: value[key] for key in MESSAGING_DEFAULTS if key in value}}
+def valid_web_push_contact_url(value):
+    """Accept only safe public VAPID contact identifiers, never a localhost default."""
+    if not isinstance(value, str) or not value or len(value) > 512 or any(character.isspace() for character in value): return False
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme == "https" and parsed.hostname:
+        host = parsed.hostname.lower()
+        return host not in {"localhost", "127.0.0.1", "::1"} and not host.endswith(".localhost")
+    return parsed.scheme == "mailto" and bool(parsed.path) and "@" in parsed.path and not parsed.netloc
 def messaging_con():
     return sqlite3.connect(f"file:{MESSAGING_DIR / 'messages.db'}?mode=ro", uri=True, timeout=2)
 def messaging_rows(query, values=()):
@@ -1647,9 +1659,14 @@ def messaging_identity():
             interval = request.form.get("interval_minutes", "60")
             try: interval = int(interval)
             except ValueError: interval = 0
-            if interval < 15: flash("Periodic announce interval must be at least 15 minutes.", "error")
+            contact_url = request.form.get("web_push_contact_url", "").strip()
+            if contact_url and not valid_web_push_contact_url(contact_url): flash("Web Push Contact URL must be a valid HTTPS or mailto URI and cannot use localhost.", "error")
+            elif interval < 15: flash("Periodic announce interval must be at least 15 minutes.", "error")
             else:
-                settings = {"enabled": bool(request.form.get("enabled")), "display_name": request.form.get("display_name", "").strip()[:80] or MESSAGING_DEFAULTS["display_name"], "announce_on_startup": bool(request.form.get("announce_on_startup")), "periodic_announce": bool(request.form.get("periodic_announce")), "interval_minutes": interval}
+                # Preserve unrelated future settings while allowing only this
+                # reviewed Web Push contact field to be changed from the UI.
+                settings = messaging_settings_document()
+                settings.update({"enabled": bool(request.form.get("enabled")), "display_name": request.form.get("display_name", "").strip()[:80] or MESSAGING_DEFAULTS["display_name"], "announce_on_startup": bool(request.form.get("announce_on_startup")), "periodic_announce": bool(request.form.get("periodic_announce")), "interval_minutes": interval, "web_push_contact_url": contact_url})
                 messaging_request("settings.json", settings); flash("Messaging identity settings saved.", "success")
         return redirect(url_for("messaging_identity"))
     return render_template("messaging_identity.html", title="My Identity", settings=messaging_settings(), status=messaging_status())

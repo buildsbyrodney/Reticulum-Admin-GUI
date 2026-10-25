@@ -1,6 +1,7 @@
 {% extends 'base.html' %}
 {% block content %}
 <h1>My Identity</h1>
+<p><a class="button" href="{{ url_for('messaging') }}">← Back to Messaging</a></p>
 <p>This is your persistent operator LXMF identity. It is separate from the Bot and does not change when you change its display name.</p>
 <section class="card">
   <p>
@@ -26,7 +27,7 @@
 </section>
 <section class="card" id="notification-settings">
   <h2>Notifications</h2>
-  <p>Web Push configured: {{ 'Yes' if status.web_push_configured else 'No' }}{% if status.web_push_subject %}<br>VAPID subject: <code>{{ status.web_push_subject }}</code>{% endif %}</p>
+  <p>Web Push configured: {{ 'Yes' if status.web_push_configured else 'No' }}{% if status.web_push_subject %}<br>Web Push Contact URL <small>VAPID subject</small>: <code>{{ status.web_push_subject }}</code>{% endif %}</p>
   <p>
     Last push attempt: {{ format_time(status.last_push_attempt) }}<br>
     Provider result: {{ status.last_provider_result or 'Not attempted yet' }}{% if status.last_provider_http_status %} · HTTP {{ status.last_provider_http_status }}{% endif %}<br>
@@ -37,7 +38,7 @@
   <button type="button" id="push-enable">Enable Notifications</button>
   <button type="button" id="push-disable" hidden>Disable Notifications</button>
   <p class="muted">Notifications are enabled separately on each browser or Home Screen app. On iOS/iPadOS 16.4 or newer, notifications require the Admin GUI to be installed to the Home Screen.</p>
-  {% if not status.web_push_configured %}<p class="muted">Set a valid HTTPS or mailto <code>WEB_PUSH_VAPID_SUBJECT</code> in the server’s <code>.env</code>, then restart the Messaging service.</p>{% endif %}
+  {% if not status.web_push_configured %}<p class="muted">Save a valid Web Push Contact URL below before enabling notifications on this device.</p>{% endif %}
 </section>
 <form class="card" method="post">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -48,6 +49,9 @@
   <label><input type="checkbox" name="periodic_announce" {% if settings.periodic_announce %}checked{% endif %}> Periodic announce</label>
   <label>Interval in minutes<input type="number" name="interval_minutes" min="15" value="{{ settings.interval_minutes }}"></label>
   <p class="muted">Minimum interval is 15 minutes. LXMF 0.9.6 does not expose a reliable delivered/read receipt for normal messages.</p>
+  <h2>Web Push setup</h2>
+  <label>Web Push Contact URL <small>VAPID subject</small><input type="url" name="web_push_contact_url" maxlength="512" value="{{ settings.web_push_contact_url or status.web_push_subject or '' }}" placeholder="https://myserver.example-tailnet.ts.net"></label>
+  <p class="muted">This identifies your Reticulum Admin server when authenticating Web Push requests. For a Tailscale Serve installation, use the HTTPS address you normally use to open Reticulum Admin. A valid <code>mailto:</code> URI is also allowed.</p>
   <button>Save Identity Settings</button>
 </form>
 <script>
@@ -57,6 +61,8 @@
   const status = document.getElementById("push-status");
   const csrf = {{ csrf_token()|tojson }};
   const publicKey = {{ status.web_push_public_key|tojson }};
+  const webPushConfigured = {{ status.web_push_configured|tojson }};
+  const contactUrl = document.querySelector('[name="web_push_contact_url"]');
   if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
     status.textContent = "Notifications are not supported in this browser.";
     enable.hidden = true;
@@ -77,6 +83,7 @@
     };
     show();
     enable.addEventListener("click", async () => {
+      if (!webPushConfigured || !contactUrl.value.trim()) { status.textContent = "Save a valid Web Push Contact URL before enabling notifications."; return; }
       if (!publicKey) { status.textContent = "Notification service is not ready yet."; return; }
       if (Notification.permission === "denied") { show(); return; }
       if (await Notification.requestPermission() !== "granted") { status.textContent = "Permission was not granted."; return; }

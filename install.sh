@@ -250,7 +250,7 @@ update_local() {
   # A push contact URI is operator-owned. Preserve it across updates; add an
   # intentionally blank key for older installations rather than guessing one.
   if ! grep -q '^WEB_PUSH_VAPID_SUBJECT=' "$ROOT/.env"; then
-    printf '\n# Optional HTTPS or mailto contact URI for Web Push VAPID.\nWEB_PUSH_VAPID_SUBJECT=\n' >> "$ROOT/.env"
+    printf '\n# Legacy Web Push VAPID contact fallback; configure Messaging -> My Identity instead.\nWEB_PUSH_VAPID_SUBJECT=\n' >> "$ROOT/.env"
   fi
   # Preserve explicit operator tuning, but move values that exactly match the
   # prior shipped defaults to the coordinated v0.5.4 timing hierarchy.

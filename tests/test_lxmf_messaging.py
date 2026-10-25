@@ -216,6 +216,12 @@ class MessagingServiceTests(unittest.TestCase):
             os.environ["WEB_PUSH_VAPID_SUBJECT"] = invalid
             self.assertIsNone(messaging.vapid_subject())
 
+    def test_saved_web_push_contact_url_overrides_legacy_env_without_changing_key_or_subscriptions(self):
+        messaging.atomic_json(messaging.REQUESTS / "settings.json", {"web_push_contact_url": "https://admin.example-tailnet.ts.net"})
+        os.environ["WEB_PUSH_VAPID_SUBJECT"] = "https://legacy.example"
+        self.assertEqual(messaging.vapid_subject(), "https://admin.example-tailnet.ts.net")
+        self.assertEqual(messaging.push_navigate_url("a" * 32), "https://admin.example-tailnet.ts.net/messaging/conversations/" + "a" * 32)
+
     def test_push_uses_configured_subject_and_keeps_existing_key_and_subscription(self):
         class WebPushException(Exception): pass
         old = sys.modules.get("pywebpush"); calls = []
@@ -250,7 +256,7 @@ class MessagingServiceTests(unittest.TestCase):
             os.environ["WEB_PUSH_VAPID_SUBJECT"] = "https://localhost"
             service.send_push("Remote", "hello", "a" * 32)
             self.assertEqual(len(calls), 1)
-            self.assertIn("WEB_PUSH_VAPID_SUBJECT", service.state["last_error"])
+            self.assertIn("Web Push Contact URL", service.state["last_error"])
         finally:
             if old is None: sys.modules.pop("pywebpush", None)
             else: sys.modules["pywebpush"] = old
@@ -472,9 +478,14 @@ class MessagingWebContractTests(unittest.TestCase):
         offline = (ROOT / "reticulum-admin" / "static" / "offline.html").read_text(encoding="utf-8")
         manifest = (ROOT / "reticulum-admin" / "static" / "manifest.webmanifest").read_text(encoding="utf-8")
         self.assertIn("Messaging", base); self.assertIn("messaging_unread", base); self.assertIn("Conversations", inbox); self.assertIn("Announces", inbox); self.assertIn("message-bubble", inbox); self.assertIn("maxlength=\"4000\"", inbox); self.assertNotIn("Add Files", inbox); self.assertNotIn("Add Image", inbox); self.assertNotIn("Add Voice", inbox); self.assertIn("separate from the Bot", identity)
-        self.assertIn("Notifications", identity); self.assertIn("Enable Notifications", identity); self.assertIn("Disable Notifications", identity); self.assertIn("Web Push configured", identity); self.assertIn("WEB_PUSH_VAPID_SUBJECT", identity)
+        self.assertIn("Notifications", identity); self.assertIn("Enable Notifications", identity); self.assertIn("Disable Notifications", identity); self.assertIn("Web Push configured", identity); self.assertIn("← Back to Messaging", identity); self.assertIn("url_for('messaging')", identity); self.assertIn("Web Push Contact URL", identity); self.assertIn("VAPID subject", identity); self.assertIn("Save a valid Web Push Contact URL", identity)
         self.assertIn('"display":"standalone"', manifest); self.assertIn("notificationclick", worker); self.assertIn("payload.notification", worker); self.assertIn("notification.navigate", worker); self.assertIn("showNotification", worker); self.assertIn("foreground-unread", worker); self.assertIn("setAppBadge", worker); self.assertNotIn("webpush-vapid.pem", worker)
         self.assertIn("Connect Tailscale, then tap Retry.", offline); self.assertIn("target", offline); self.assertIn("fetch(target", offline)
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("validated and supported for iPhone and iPad Home Screen web apps", readme)
+        self.assertIn("tailscale serve status", readme)
+        self.assertIn("Do not guess or manually construct the tailnet hostname", readme)
+        self.assertIn("Accepted by push provider", readme)
 
     def test_chat_layout_has_responsive_mobile_and_plain_text_contracts(self):
         style = (ROOT / "reticulum-admin" / "static" / "app.css").read_text(encoding="utf-8")
@@ -561,6 +572,23 @@ class MessagingWebContractTests(unittest.TestCase):
                 self.assertEqual(client.post("/messaging/api/conversations/" + "a" * 32 + "/read").status_code, 400)
                 with client.session_transaction() as session:
                     session["csrf"] = "read-csrf"
+                # My Identity owns one reviewed public VAPID-contact field;
+                # saving it leaves any future unrelated settings intact.
+                request_root = Path(temporary) / "requests"
+                request_root.mkdir(parents=True, exist_ok=True)
+                (request_root / "settings.json").write_text(json.dumps({"future_setting": "preserved", "web_push_contact_url": "https://old.example"}), encoding="utf-8")
+                identity_form = {"csrf_token": "read-csrf", "enabled": "on", "display_name": "Reticulum Admin User", "announce_on_startup": "on", "interval_minutes": "60", "web_push_contact_url": "https://admin.example-tailnet.ts.net"}
+                self.assertEqual(client.post("/messaging/identity", data=identity_form).status_code, 302)
+                saved_settings = json.loads((request_root / "settings.json").read_text(encoding="utf-8"))
+                self.assertEqual(saved_settings["web_push_contact_url"], "https://admin.example-tailnet.ts.net")
+                self.assertEqual(saved_settings["future_setting"], "preserved")
+                identity_form["web_push_contact_url"] = "http://localhost"
+                self.assertEqual(client.post("/messaging/identity", data=identity_form).status_code, 302)
+                self.assertEqual(json.loads((request_root / "settings.json").read_text(encoding="utf-8"))["web_push_contact_url"], "https://admin.example-tailnet.ts.net")
+                self.assertTrue(app_module.valid_web_push_contact_url("https://admin.example-tailnet.ts.net"))
+                self.assertTrue(app_module.valid_web_push_contact_url("mailto:operator@example.net"))
+                for invalid_contact in ("", "http://admin.example", "https://localhost", "https://node.localhost", "not-a-uri"):
+                    self.assertFalse(app_module.valid_web_push_contact_url(invalid_contact))
                 subscription = {"endpoint": "https://push.example/current-device", "keys": {"p256dh": "abc_123", "auth": "def_456"}}
                 self.assertEqual(client.post("/messaging/api/push-subscriptions", json={"subscription": subscription}).status_code, 400)
                 self.assertEqual(client.post("/messaging/api/push-subscriptions", json={"subscription": subscription, "csrf_token": "read-csrf"}).status_code, 202)

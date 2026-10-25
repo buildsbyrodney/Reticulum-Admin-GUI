@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 STATE = Path(os.environ.get("MESSAGING_STATE_DIR", "/messaging"))
 REQUESTS = Path(os.environ.get("MESSAGING_REQUEST_DIR", "/requests"))
 RETICULUM_READY = Path("/reticulum/admin-status/rnsd.ready")
-DEFAULTS = {"enabled": True, "display_name": "Reticulum Admin User", "announce_on_startup": True, "periodic_announce": False, "interval_minutes": 60}
+DEFAULTS = {"enabled": True, "display_name": "Reticulum Admin User", "announce_on_startup": True, "periodic_announce": False, "interval_minutes": 60, "web_push_contact_url": ""}
 MIN_INTERVAL, MAX_BODY = 15, 4000
 PATH_LOOKUP_SECONDS = max(1, min(30, int(os.environ.get("MESSAGING_PATH_LOOKUP_SECONDS", "10"))))
 DESTINATION_RE = re.compile(r"[0-9a-fA-F]{32}")
@@ -15,8 +15,12 @@ APPLICATION_ASPECTS = ("lxmf.delivery", "lxmf.propagation", "nomadnetwork.node")
 PUSH_DIAGNOSTICS_DEFAULTS = {"last_push_attempt": None, "last_provider_result": None, "last_provider_http_status": None, "last_provider_accepted": None, "push_attempts": 0, "provider_accepts": 0, "provider_failures": 0, "stale_subscriptions_removed": 0}
 
 def vapid_subject():
-    """Return a safe VAPID contact URI or None; never invent a localhost one."""
-    value = os.environ.get("WEB_PUSH_VAPID_SUBJECT", "").strip()
+    """Return the reviewed GUI contact URI or legacy environment value.
+
+    The contact URI is public VAPID metadata, but it is intentionally scoped to
+    this one Messaging setting. It is not a generic environment editor.
+    """
+    value = str(settings().get("web_push_contact_url") or os.environ.get("WEB_PUSH_VAPID_SUBJECT", "")).strip()
     if not value or len(value) > 512 or any(character.isspace() for character in value): return None
     parsed = urlparse(value)
     if parsed.scheme == "https" and parsed.hostname:
@@ -167,7 +171,7 @@ class Messaging:
     def send_push(self, sender, body, destination):
         subject = vapid_subject()
         if not subject:
-            self.state["last_error"] = "Web Push is not configured: set a valid WEB_PUSH_VAPID_SUBJECT."
+            self.state["last_error"] = "Web Push is not configured: save a valid Web Push Contact URL."
             self.record_push_result("Configuration error", attempted=False)
             return
         try:

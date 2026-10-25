@@ -135,7 +135,33 @@ If the messaging service restarts while an outbound message is Pending or Queued
 
 My Identity is separate from the Test Echo Bot. Messages persist locally under `data/messaging/`; they are not copied into Timeline, Diagnostics, or generic logs. The server must be running to receive direct messages. LXMF clients can cache a display name until a later announce or rediscovery.
 
-Web Push notifications are an explicit, per-browser or per-Home-Screen-app opt-in in **Messaging → My Identity**. Set `WEB_PUSH_VAPID_SUBJECT` in `.env` to a real HTTPS origin (for example your private HTTPS Admin GUI address) or a valid `mailto:` URI before sending notifications. Blank, localhost, and malformed values are rejected; there is no localhost fallback. The Messaging service stores its VAPID key at `data/messaging/webpush-vapid.pem` with owner-only permissions and stores each provider subscription in the Messaging SQLite database. The private key and browser subscription secrets are never returned by the Admin GUI. A new inbound LXMF message, once durably stored, can send a bounded plain-text sender/preview notification; outbound messages, state changes, and read/unread activity do not. iPhone and iPad support requires iOS/iPadOS 16.4+ and installation of the trusted HTTPS Admin GUI to the Home Screen. If the notification is tapped while the private Admin URL is unreachable, the cached page says **Connect Tailscale, then tap Retry.** It tests reachability only; it cannot inspect or enable a VPN. Attachments, group chat, and remote administration through LXMF messages remain out of scope.
+### Web Push notifications (v0.9.2)
+
+Web Push notifications are an explicit, per-browser or per-Home-Screen-app opt-in in **Messaging → My Identity**. Configure **Web Push Contact URL** there before enabling notifications. This public **VAPID subject** identifies the Reticulum Admin server to push providers; it accepts only a real `https://` URL or valid `mailto:` URI. Blank, HTTP, localhost, and malformed values are rejected, with no localhost fallback. The setting is stored in the existing persistent Messaging settings document, so it survives container rebuilds and installer updates without granting the web app general `.env` access. Existing installations may retain `WEB_PUSH_VAPID_SUBJECT` in `.env` as a compatibility fallback; a saved GUI value takes precedence.
+
+Web Push notifications in v0.9.2 are currently validated and supported for iPhone and iPad Home Screen web apps on iOS/iPadOS 16.4 or newer and trusted HTTPS. Other browsers may support standards-based Web Push, but they are not yet part of the supported/validated test matrix for this release.
+
+#### iPhone and iPad setup
+
+1. Make Reticulum Admin reachable at a trusted HTTPS URL. If using Tailscale, configure Tailscale Serve for the Admin GUI.
+2. Run `tailscale serve status` and copy the exact HTTPS origin it reports. **Do not guess or manually construct the tailnet hostname.**
+3. In **Messaging → My Identity**, enter that exact origin as **Web Push Contact URL**, then save the Identity settings. A `mailto:` contact is also valid, but an HTTPS origin provides the best notification-tap destination.
+4. Open Reticulum Admin in Safari on the iPhone or iPad, choose **Add to Home Screen**, then launch it from the new Home Screen icon.
+5. Open **Messaging → My Identity**, tap **Enable Notifications**, and accept the iOS permission prompt. Confirm that the page says permission is granted and this device is enabled.
+6. Background the app rather than force-quitting it during initial testing. Send a new inbound LXMF message to the Messaging identity, confirm the sender-and-preview banner, then tap it to open the conversation.
+
+Apple can deliver the push while Tailscale is disconnected. Tailscale must be connected to open a private Admin GUI that is only available through the tailnet. When a notification tap cannot reach the Admin GUI, the cached PWA page says **Connect Tailscale, then tap Retry.** Retry tests Admin GUI reachability and opens the intended conversation when it returns; it does not inspect or enable the VPN.
+
+| Symptom | What to check |
+| --- | --- |
+| Permission is not requested | Launch the Home Screen app and tap **Enable Notifications**. |
+| Permission is denied | Enable Reticulum Admin notifications in iOS Settings, then return to the Home Screen app. |
+| Push provider rejects a request | Check the saved Web Push Contact URL / VAPID subject. |
+| Banner arrives but tapping it fails | Verify the exact HTTPS hostname from `tailscale serve status` and Tailscale reachability. |
+| Provider says Accepted but no banner appears | Confirm the Home Screen app, iOS notification settings, and service-worker update state. **Accepted by push provider** does not mean displayed on iPhone. |
+| A subscription is stale | Disable and re-enable notifications for that device only. |
+
+The Messaging service stores its VAPID key at `data/messaging/webpush-vapid.pem` with owner-only permissions and stores each provider subscription in the Messaging SQLite database. Installer updates preserve the VAPID key and subscriptions; devices do not need to re-grant permission unless the subscription itself is stale. The private key and browser subscription secrets are never returned by the Admin GUI. A new inbound LXMF message, once durably stored, can send a bounded plain-text sender/preview notification; outbound messages, state changes, and read/unread activity do not. Attachments, group chat, and remote administration through LXMF messages remain out of scope.
 
 The push payload follows WebKit’s Declarative Web Push format (`web_push: 8030`), while the installed service worker provides the compatible replacement/fallback notification path for older browsers. Messaging records only bounded provider-side diagnostics: attempts, accepted/rejected result, HTTP status, and stale-subscription removals. “Accepted by push provider” is not a claim that an iPhone displayed a notification. Foreground unread refreshes can also update an app badge, so a badge change alone is not evidence of background push receipt. The service worker does not send unauthenticated telemetry to the server; client receipt cannot be proven by the server.
 
