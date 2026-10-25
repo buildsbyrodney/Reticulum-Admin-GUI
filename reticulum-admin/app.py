@@ -1244,6 +1244,7 @@ def nomad_browser():
     if parsed_address: destination, path = parsed_address
     request_id = request.args.get("request_id", "").strip()
     identify = nomad_identify_requested(request.args.get("identify"))
+    autoload = request.args.get("autoload") == "1"
     if request.method == "POST":
         require_csrf()
         address = request.form.get("address", "").strip()
@@ -1264,7 +1265,7 @@ def nomad_browser():
     destination = destination if valid_destination(destination) else ""
     selected_node = next((node for node in nodes if node.get("destination_hash", "").lower() == destination), None)
     selected_name = ((selected_node or {}).get("contact_name") or (selected_node or {}).get("display_name") or short_destination(destination)) if destination else ""
-    return render_template("nomad.html", title="Nomad Browser", destination=destination, path=path, address=(destination + ":" + path) if destination else address, page=nomad_page(destination, path) if destination else None, request_id=request_id, identify=identify, nodes=nodes, selected_node=selected_node, selected_name=selected_name, status=nomad_status(), short_destination=short_destination)
+    return render_template("nomad.html", title="Nomad Browser", destination=destination, path=path, address=(destination + ":" + path) if destination else address, page=nomad_page(destination, path) if destination else None, request_id=request_id, identify=identify, autoload=autoload, nodes=nodes, selected_node=selected_node, selected_name=selected_name, status=nomad_status(), short_destination=short_destination)
 
 @app.get("/nomad/api/pages/<destination>")
 @login_required

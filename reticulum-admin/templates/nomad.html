@@ -1,26 +1,26 @@
 {% extends 'base.html' %}
 {% block content %}
-<section class="nomad-page" data-page-api="{{ url_for('nomad_page_api', destination=destination) if destination else '' }}" data-page-path="{{ path }}" data-request-id="{{ request_id }}" data-request-pending="{{ 'true' if request_id else 'false' }}">
-  <div class="page-actions"><div><h1>Nomad Browser</h1><p>Read a public NomadNet page through the managed Reticulum shared instance. This browser does not host pages, execute remote content, download files, or change Reticulum settings.</p></div></div>
-  <p>Status: <strong>{{ 'Ready' if status.running else 'Waiting for Reticulum' }}</strong> · Shared instance: {{ 'Connected' if status.shared_instance_connected else 'Waiting' }} · Cached pages: {{ status.page_cache_count or 0 }}</p>
+<section class="nomad-page" data-page-api="{{ url_for('nomad_page_api', destination=destination) if destination else '' }}" data-page-path="{{ path }}" data-request-id="{{ request_id }}" data-request-pending="{{ 'true' if request_id else 'false' }}" data-autoload="{{ 'true' if autoload else 'false' }}">
+  <div class="page-actions"><div><h1>Nomad Browser</h1><p>Read public NomadNet pages through the managed Reticulum shared instance. This is a safe, text-only browser: it does not host pages, execute remote content, download files, or change Reticulum settings.</p></div></div>
+  <p>Status: <strong>{{ 'Ready' if status.running else 'Waiting for Reticulum' }}</strong> · Shared instance: {{ 'Connected' if status.shared_instance_connected else 'Waiting' }} · Resource transfers: {{ 'Ready' if status.resource_storage_ready else 'Waiting' }} · Cached pages: {{ status.page_cache_count or 0 }}</p>
   {% if status.identity %}<p class="muted">Browser identity: <code>{{ status.identity }}</code>. Give this hash to a page owner only when they need to allow this browser to view an identity-protected page.</p>{% else %}<p class="muted">Browser identity is being prepared. It is separate from the Bot, Messaging, and Admin identities.</p>{% endif %}
   <div class="nomad-layout">
-    <aside class="card nomad-nodes"><h2>Observed Nomad nodes</h2>
-      {% if nodes %}<ul>{% for node in nodes %}<li><a href="{{ url_for('nomad_browser', destination=node.destination_hash) }}">{{ node.contact_name or node.display_name or short_destination(node.destination_hash) }}</a><br><small><code>{{ short_destination(node.destination_hash) }}</code> · {{ format_time(node.last_seen) }}</small></li>{% endfor %}</ul>{% else %}<p class="muted">No NomadNet node announces have been observed yet.</p>{% endif %}
+    <aside class="card nomad-nodes nomad-terminal-sidebar"><div class="nomad-sidebar-title"><h2>Observed nodes</h2><span aria-hidden="true">⌁</span></div>
+      {% if nodes %}<ul>{% for node in nodes %}<li class="{{ 'selected' if node.destination_hash|lower == destination else '' }}"><a href="{{ url_for('nomad_browser', destination=node.destination_hash, path='/page/index.mu', autoload='1') }}"><strong>{{ node.contact_name or node.display_name or short_destination(node.destination_hash) }}</strong><br><small><code>{{ short_destination(node.destination_hash) }}</code> · {% if node.last_hops is not none %}{{ 'Direct' if node.last_hops == 1 else node.last_hops|string + ' hops' }}{% else %}Hops unavailable{% endif %}</small></a></li>{% endfor %}</ul>{% else %}<p class="muted">No NomadNet node announces have been observed yet.</p>{% endif %}
       <p class="muted">Node names are public announce metadata, not proof of identity.</p>
     </aside>
-    <div class="nomad-content card">
-      <h2>{{ selected_name if destination else 'Choose a node' }}</h2>
-      <form method="post" class="inline nomad-request">
+    <div class="nomad-content card nomad-terminal-window">
+      <div class="nomad-terminal-titlebar"><span class="nomad-terminal-dot" aria-hidden="true"></span><div><h2>{{ selected_name if destination else 'Choose a node' }}</h2>{% if destination %}<small><code>{{ short_destination(destination) }}</code>{% if selected_node and selected_node.last_hops is not none %} · {{ 'Direct' if selected_node.last_hops == 1 else selected_node.last_hops|string + ' hops' }}{% endif %}</small>{% endif %}</div></div>
+      <form method="post" class="inline nomad-request nomad-address-bar">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label>Nomad address <input name="address" value="{{ address }}" maxlength="233" placeholder="f3a1841252ae84abe3a4980171d5817c:/page/index.mu" required spellcheck="false" autocomplete="off"></label>
         <input type="hidden" name="destination" value="{{ destination }}">
         <input type="hidden" name="path" value="{{ path }}">
         <label class="nomad-identify"><input type="checkbox" name="identify" value="1" {% if identify %}checked{% endif %}> Identify this browser to the selected node</label>
-        <button>Load page</button>
+        <button>Load</button>
       </form>
       <p class="muted">Enter a Nomad address in the form <code>destination:/page/index.mu</code>. Leave identification off for public pages. Turn it on only when the node owner has allowed the Browser identity shown above; the selected node will then learn that identity.</p>
-      {% if destination %}<p><strong>{{ short_destination(destination) }}</strong> · <code>{{ destination }}</code>{% if selected_node and selected_node.last_hops is not none %} · {{ selected_node.last_hops }} hop{{ '' if selected_node.last_hops == 1 else 's' }}{% endif %}</p>{% endif %}
+      {% if destination %}<p class="nomad-destination"><code>{{ destination }}</code></p>{% endif %}
       <div id="nomad-page-result" class="nomad-page-result" aria-live="polite">
       {% if request_id and (not page or page.request_id != request_id) %}
         <p>Loading page…</p>
@@ -43,7 +43,7 @@
 (() => {
   const page = document.querySelector('.nomad-page'), result = document.getElementById('nomad-page-result');
   if (!page || !result) return;
-  const requestedId=page.dataset.requestId, isPending=page.dataset.requestPending === 'true';
+  const requestedId=page.dataset.requestId, isPending=page.dataset.requestPending === 'true', autoLoad=page.dataset.autoload === 'true';
   const destination = page.dataset.pageApi.split('/').pop() || '';
   const safePath = value => typeof value === 'string' && /^\/page\/[^\s]{1,194}$/.test(value) && !value.includes('..') && !value.includes('\\');
   function localPageUrl(target) {
@@ -86,6 +86,12 @@
   }
   const initial=result.querySelector('.nomad-raw-fallback');
   if (initial) showPage(initial.textContent);
+  // Selecting an observed node starts its normal, CSRF-protected form request.
+  // Without JavaScript, the same selected page remains available via Load.
+  if (autoLoad && !requestedId) {
+    const form=page.querySelector('.nomad-request');
+    if (form && typeof form.requestSubmit === 'function') window.requestAnimationFrame(() => form.requestSubmit());
+  }
   if ((isPending || result.textContent.includes('Loading page')) && page.dataset.pageApi && window.fetch) refresh();
 })();
 </script>

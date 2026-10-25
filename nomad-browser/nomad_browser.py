@@ -16,6 +16,8 @@ from pathlib import Path
 STATE = Path(os.environ.get("NOMAD_STATE_DIR", "/nomad"))
 REQUESTS = Path(os.environ.get("NOMAD_REQUEST_DIR", "/requests"))
 RETICULUM_READY = Path("/reticulum/admin-status/rnsd.ready")
+RESOURCE_STORAGE = Path(os.environ.get("NOMAD_RESOURCE_STORAGE_DIR", "/reticulum/storage/resources"))
+RATCHET_STORAGE = Path(os.environ.get("NOMAD_RATCHET_STORAGE_DIR", "/reticulum/storage/ratchets"))
 DESTINATION_RE = re.compile(r"[0-9a-fA-F]{32}")
 DEFAULT_PATH = "/page/index.mu"
 MAX_PATH = 200
@@ -43,6 +45,25 @@ def valid_page_path(value):
         return False
     return (value.startswith("/page/") and len(value) <= MAX_PATH and ".." not in value
             and "\\" not in value and "\x00" not in value)
+
+
+def transfer_storage_available():
+    """Confirm this client can assemble received RNS Resources safely.
+
+    The shared Reticulum mount is intentionally read-only. Compose supplies
+    writable child mounts only for this Browser's Resource and ratchet state.
+    A large remote Micron page can otherwise look like a link timeout because
+    RNS cannot finish assembling its Resource response.
+    """
+    try:
+        for directory in (RESOURCE_STORAGE, RATCHET_STORAGE):
+            directory.mkdir(parents=True, exist_ok=True)
+            probe = directory / ".nomad-browser-write-probe"
+            probe.write_bytes(b"")
+            probe.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
 
 
 def connect():
@@ -77,7 +98,8 @@ class NomadBrowser:
         self.started = int(time.time())
         self.identity = None
         self.state = {"last_error": None, "last_fetch_at": None, "last_destination": None,
-                      "last_path": None, "requests_processed": 0}
+                      "last_path": None, "requests_processed": 0,
+                      "resource_storage_ready": False}
 
     def load_identity(self, RNS):
         """Load one private, persistent identity used only when requested.
@@ -223,6 +245,13 @@ class NomadBrowser:
         self.load_identity(RNS)
         while True:
             try:
+                self.state["resource_storage_ready"] = transfer_storage_available()
+                if not self.state["resource_storage_ready"]:
+                    self.state["last_error"] = "Nomad Browser resource transfer storage is unavailable."
+                    self.status(False)
+                    time.sleep(5)
+                    continue
+                self.state["last_error"] = None
                 self.process_requests(RNS)
                 self.status(True)
                 time.sleep(1)

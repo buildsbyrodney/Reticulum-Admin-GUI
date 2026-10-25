@@ -46,9 +46,24 @@ class NomadBrowserServiceTests(unittest.TestCase):
         service = compose.split("  nomad-browser:", 1)[1].split("\nnetworks:", 1)[0]
         self.assertIn('require_shared_instance=True', source)
         self.assertIn('./data/reticulum:/reticulum:ro', service)
+        self.assertIn('./data/nomad/reticulum-storage/resources:/reticulum/storage/resources', service)
+        self.assertIn('./data/nomad/reticulum-storage/ratchets:/reticulum/storage/ratchets', service)
+        self.assertIn('NOMAD_REQUEST_TIMEOUT_SECONDS: ${NOMAD_REQUEST_TIMEOUT_SECONDS:-45}', service)
         self.assertNotIn('MANAGEMENT_TOKEN', service)
         self.assertNotIn('docker.sock', service)
         self.assertNotIn('ports:', service)
+
+    def test_resource_transfer_storage_is_isolated_and_writable(self):
+        original_resources, original_ratchets = nomad.RESOURCE_STORAGE, nomad.RATCHET_STORAGE
+        try:
+            nomad.RESOURCE_STORAGE = nomad.STATE / "reticulum-storage" / "resources"
+            nomad.RATCHET_STORAGE = nomad.STATE / "reticulum-storage" / "ratchets"
+            self.assertTrue(nomad.transfer_storage_available())
+            self.assertTrue(nomad.RESOURCE_STORAGE.is_dir())
+            self.assertTrue(nomad.RATCHET_STORAGE.is_dir())
+            self.assertFalse((nomad.RESOURCE_STORAGE / ".nomad-browser-write-probe").exists())
+        finally:
+            nomad.RESOURCE_STORAGE, nomad.RATCHET_STORAGE = original_resources, original_ratchets
 
     def test_request_is_persisted_then_fetched_over_nomad_node_aspect(self):
         target, calls = "a" * 32, []
@@ -168,9 +183,18 @@ class NomadBrowserWebTests(unittest.TestCase):
         self.assertIn("&lt;b&gt;safe text&lt;/b&gt;", page)
         self.assertIn("Nomad Browser", (ROOT / "reticulum-admin" / "templates" / "base.html").read_text(encoding="utf-8"))
         self.assertIn("Nomad address", page)
+        self.assertIn("data-autoload", page)
         self.assertIn("safePath", page)
         self.assertIn("document.createElement", page)
         self.assertNotIn("Add Files", page)
+
+    def test_observed_node_link_autoloads_the_default_page_progressively(self):
+        template = (ROOT / "reticulum-admin" / "templates" / "nomad.html").read_text(encoding="utf-8")
+        self.assertIn("autoload='1'", template)
+        self.assertIn("form.requestSubmit()", template)
+        self.assertIn("Without JavaScript", template)
+        page = self.client().get(f"/nomad?destination={self.destination}&autoload=1").get_data(as_text=True)
+        self.assertIn('data-autoload="true"', page)
 
     def test_compact_nomad_address_is_exact_and_safe(self):
         address = self.destination.upper() + ":/page/index.mu"

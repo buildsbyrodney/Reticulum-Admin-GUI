@@ -138,8 +138,17 @@ services:
     environment:
       NOMAD_STATE_DIR: /nomad
       NOMAD_REQUEST_DIR: /requests
+      # A multi-hop Nomad page can arrive as an RNS Resource, which needs its
+      # own local assembly area. This remains bounded and is separate from
+      # the managed rnsd state.
+      NOMAD_REQUEST_TIMEOUT_SECONDS: ${NOMAD_REQUEST_TIMEOUT_SECONDS:-45}
     volumes:
       - ./data/reticulum:/reticulum:ro
+      # Keep Reticulum configuration and the shared-instance socket read-only.
+      # These two writable overlays are only this Browser client's transient
+      # Resource assembly and ratchet state.
+      - ./data/nomad/reticulum-storage/resources:/reticulum/storage/resources
+      - ./data/nomad/reticulum-storage/ratchets:/reticulum/storage/ratchets
       - ./data/nomad:/nomad
       - ./data/nomad-requests:/requests
 
