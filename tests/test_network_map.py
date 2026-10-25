@@ -19,7 +19,7 @@ class NetworkMapTests(unittest.TestCase):
     def setUp(self):
         self.original = {name: getattr(self.web, name) for name in (
             "ingest_snapshot", "configuration_model", "labels", "messaging_announced_peers", "messaging_application_announces",
-            "bot_status", "messaging_status", "transport_enabled")}
+            "bot_status", "messaging_status", "transport_enabled", "MESSAGING_REQUEST_DIR")}
         self.web.ingest_snapshot = lambda: ({"running": True, "paths": [{"hash": "a" * 32, "hops": 2, "via": "b" * 32, "interface": "LAN"}]}, [
             {"name": "TCPServerInterface[LAN/192.168.1.85:4243]", "short_name": "LAN", "type": "TCPServerInterface", "status_display": "Up", "mode_display": "Gateway", "client_count": 1, "ifac_netname": "Local"}], [
             {"key": "client-key", "remote_ip": "192.168.1.145", "remote_port": 57032, "interface": "LAN", "status": "active", "rx": 1, "tx": 2}])
@@ -146,6 +146,27 @@ class NetworkMapTests(unittest.TestCase):
         self.assertIn("nodes", payload); self.assertIn("edges", payload)
         self.assertNotIn("actions", payload)
 
+    def test_clear_observed_announces_requires_confirmation_csrf_and_uses_a_narrow_request(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            requests = Path(temporary) / "messaging-requests"
+            self.web.MESSAGING_REQUEST_DIR = requests
+            with self.web.app.test_client() as client:
+                self.assertEqual(client.post("/topology/clear-announces").status_code, 302)
+                with client.session_transaction() as state:
+                    state["admin"] = "operator"; state["csrf"] = "topology-csrf"
+                self.assertEqual(client.get("/topology").status_code, 200)
+                self.assertEqual(client.post("/topology/clear-announces", data={"csrf_token": "topology-csrf", "confirmation": "wrong"}).status_code, 302)
+                self.assertFalse(requests.exists())
+                self.assertEqual(client.post("/topology/clear-announces", data={"csrf_token": "topology-csrf", "confirmation": "CLEAR ANNOUNCES"}).status_code, 302)
+            files = list(requests.glob("clear-announces-*.json"))
+            self.assertEqual(len(files), 1)
+            request = __import__("json").loads(files[0].read_text(encoding="utf-8"))
+            self.assertEqual(request["action"], "clear_observed_announces")
+            self.assertTrue(request["id"])
+        source = (Path(__file__).parents[1] / "reticulum-admin" / "app.py").read_text(encoding="utf-8")
+        self.assertIn("messaging_request(f\"clear-announces-", source)
+        self.assertNotIn("DELETE FROM announced_peers", source)
+
     def test_page_is_mobile_safe_and_routes_nodes_contextually(self):
         template = (Path(__file__).parents[1] / "reticulum-admin" / "templates" / "topology.html").read_text(encoding="utf-8")
         css = (Path(__file__).parents[1] / "reticulum-admin" / "static" / "app.css").read_text(encoding="utf-8")
@@ -156,6 +177,9 @@ class NetworkMapTests(unittest.TestCase):
         self.assertNotIn("function tick()", template)
         self.assertIn("@media (max-width: 700px)", css)
         self.assertNotIn("blackhole", template.lower())
+        self.assertIn("Clear observed announce history", template)
+        self.assertIn("CLEAR ANNOUNCES", template)
+        self.assertNotIn("docker compose", template)
 
     def test_mobile_navigation_is_accessible_and_progressively_enhanced(self):
         root = Path(__file__).parents[1]

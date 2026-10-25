@@ -168,6 +168,11 @@ class NomadBrowserWebTests(unittest.TestCase):
         self.assertIn("&lt;b&gt;safe text&lt;/b&gt;", page)
         self.assertIn("Nomad Browser", (ROOT / "reticulum-admin" / "templates" / "base.html").read_text(encoding="utf-8"))
 
+    def test_identify_option_is_compact_on_desktop_and_full_width_on_mobile(self):
+        css = (ROOT / "reticulum-admin" / "static" / "app.css").read_text(encoding="utf-8")
+        self.assertIn(".nomad-request .nomad-identify { display: inline-flex; flex: 0 0 auto;", css)
+        self.assertIn(".nomad-request .nomad-identify { width: 100%; white-space: normal;", css)
+
     def test_browse_post_only_creates_narrow_request_file_and_marks_live_request(self):
         root = Path(os.environ["NOMAD_REQUEST_DIR"])
         response = self.client().post("/nomad", data={"csrf_token": "csrf", "destination": self.destination, "path": "/page/index.mu", "identify": "1"})

@@ -1,1 +1,132 @@
-{% extends 'base.html' %}{% block content %}<h1>My Identity</h1><p>This is your persistent operator LXMF identity. It is separate from the Bot and does not change when you change its display name.</p><section class="card"><p>Status: {{ 'Running' if status.running else 'Waiting / unavailable' }} · Shared instance: {{ 'Connected' if status.shared_instance_connected else 'Waiting' }} · Router: {{ 'Ready' if status.lxmf_router_ready else 'Waiting' }}<br>Destination: <code>{{ status.destination or 'Not ready yet' }}</code><br>Identity: <code>{{ status.identity or 'Not ready yet' }}</code><br>Last announce: {{ format_time(status.last_announce) }}<br>Application announces observed since startup: {{ status.application_announces_observed or 0 }}<br>Unique application destinations stored: {{ status.unique_application_announce_destinations or 0 }}<br>Delivery: {{ (status.application_announce_counts or {}).get('lxmf.delivery', 0) }} · Propagation: {{ (status.application_announce_counts or {}).get('lxmf.propagation', 0) }} · NomadNet: {{ (status.application_announce_counts or {}).get('nomadnetwork.node', 0) }}<br>Last observed application announce: {{ format_time(status.last_application_announce) }}</p><p class="muted">This service passively records documented public application announces it receives after startup. Display names are informational, not proof of identity; it does not scrape logs or fabricate historical peers.</p><form class="inline" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="announce"><button {% if not status.destination %}disabled{% endif %}>Announce Now</button></form></section><form class="card" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><label><input type="checkbox" name="enabled" {% if settings.enabled %}checked{% endif %}> Enabled</label><label>Display Name<input name="display_name" maxlength="80" value="{{ settings.display_name }}"></label><p class="muted">Some LXMF clients cache names until a later announce or rediscovery. Changing this name does not change the destination hash.</p><label><input type="checkbox" name="announce_on_startup" {% if settings.announce_on_startup %}checked{% endif %}> Announce on startup</label><label><input type="checkbox" name="periodic_announce" {% if settings.periodic_announce %}checked{% endif %}> Periodic announce</label><label>Interval in minutes<input type="number" name="interval_minutes" min="15" value="{{ settings.interval_minutes }}"></label><p class="muted">Minimum interval is 15 minutes. LXMF 0.9.6 does not expose a reliable delivered/read receipt for normal messages.</p><button>Save Identity Settings</button></form>{% endblock %}
+{% extends 'base.html' %}
+{% block content %}
+<h1>My Identity</h1>
+<p><a class="button" href="{{ url_for('messaging') }}">← Back to Messaging</a></p>
+<p>This is your persistent operator LXMF identity. It is separate from the Bot and does not change when you change its display name.</p>
+<section class="card">
+  <p>
+    Status: {{ 'Running' if status.running else 'Waiting / unavailable' }} ·
+    Shared instance: {{ 'Connected' if status.shared_instance_connected else 'Waiting' }} ·
+    Router: {{ 'Ready' if status.lxmf_router_ready else 'Waiting' }}<br>
+    Destination: <code>{{ status.destination or 'Not ready yet' }}</code><br>
+    Identity: <code>{{ status.identity or 'Not ready yet' }}</code><br>
+    Last announce: {{ format_time(status.last_announce) }}<br>
+    Application announces observed since startup: {{ status.application_announces_observed or 0 }}<br>
+    Unique application destinations stored: {{ status.unique_application_announce_destinations or 0 }}<br>
+    Delivery: {{ (status.application_announce_counts or {}).get('lxmf.delivery', 0) }} ·
+    Propagation: {{ (status.application_announce_counts or {}).get('lxmf.propagation', 0) }} ·
+    NomadNet: {{ (status.application_announce_counts or {}).get('nomadnetwork.node', 0) }}<br>
+    Last observed application announce: {{ format_time(status.last_application_announce) }}
+  </p>
+  <p class="muted">This service passively records documented public application announces it receives after startup. Display names are informational, not proof of identity; it does not scrape logs or fabricate historical peers.</p>
+  <form class="inline" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="action" value="announce">
+    <button {% if not status.destination %}disabled{% endif %}>Announce Now</button>
+  </form>
+</section>
+<form class="identity-settings" method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <section class="card web-push-card" id="notification-settings">
+    <h2>Web Push Notifications</h2>
+    <div class="web-push-block">
+      <h3>Web Push configuration</h3>
+      <label>Web Push Contact URL <small>VAPID subject</small><input type="url" name="web_push_contact_url" maxlength="512" value="{{ settings.web_push_contact_url or status.web_push_subject or '' }}" placeholder="https://myserver.example-tailnet.ts.net"></label>
+      <p class="muted">This identifies your Reticulum Admin server when authenticating Web Push requests. For a Tailscale Serve installation, use the HTTPS address you normally use to open Reticulum Admin. A valid <code>mailto:</code> URI is also allowed.</p>
+      <button>Save Web Push Settings</button>
+    </div>
+    <div class="web-push-block">
+      <h3>Device notifications</h3>
+      <p>Web Push configured: <strong>{{ 'Yes' if status.web_push_configured else 'No' }}</strong>{% if status.web_push_subject %}<br><small>Active VAPID subject: <code>{{ status.web_push_subject }}</code></small>{% endif %}</p>
+      <p><strong>Browser permission and this-device subscription</strong><br><span id="push-status">Checking browser notification support…</span></p>
+      <div class="inline web-push-actions"><button type="button" id="push-enable">Enable Notifications</button><button type="button" id="push-disable" hidden>Disable Notifications</button></div>
+      <p class="muted">Notifications are enabled separately on each browser or Home Screen app. On iOS/iPadOS 16.4 or newer, notifications require the Admin GUI to be installed to the Home Screen.</p>
+      {% if not status.web_push_configured %}<p class="muted">Save a valid Web Push Contact URL above before enabling notifications on this device.</p>{% endif %}
+    </div>
+    <div class="web-push-block web-push-diagnostics">
+      <h3>Provider diagnostics</h3>
+      <dl>
+        <div><dt>Last push attempt</dt><dd>{{ format_time(status.last_push_attempt) }}</dd></div>
+        <div><dt>Provider result</dt><dd>{{ status.last_provider_result or 'Not attempted yet' }}</dd></div>
+        <div><dt>Provider HTTP status</dt><dd>{% if status.last_provider_http_status %}HTTP {{ status.last_provider_http_status }}{% else %}Not reported{% endif %}</dd></div>
+        <div><dt>Last accepted by provider</dt><dd>{{ format_time(status.last_provider_accepted) }}</dd></div>
+        <div><dt>Push attempts</dt><dd>{{ status.push_attempts or 0 }}</dd></div>
+        <div><dt>Provider accepts</dt><dd>{{ status.provider_accepts or 0 }}</dd></div>
+        <div><dt>Provider failures</dt><dd>{{ status.provider_failures or 0 }}</dd></div>
+        <div><dt>Stale subscriptions removed</dt><dd>{{ status.stale_subscriptions_removed or 0 }}</dd></div>
+      </dl>
+      <p class="muted">Provider diagnostics describe the provider response only. “Accepted” does not confirm that a device displayed a banner.</p>
+    </div>
+  </section>
+  <section class="card identity-settings-card">
+    <h2>Messaging identity settings</h2>
+    <label><input type="checkbox" name="enabled" {% if settings.enabled %}checked{% endif %}> Enabled</label>
+    <label>Display Name<input name="display_name" maxlength="80" value="{{ settings.display_name }}"></label>
+    <p class="muted">Some LXMF clients cache names until a later announce or rediscovery. Changing this name does not change the destination hash.</p>
+    <label><input type="checkbox" name="announce_on_startup" {% if settings.announce_on_startup %}checked{% endif %}> Announce on startup</label>
+    <label><input type="checkbox" name="periodic_announce" {% if settings.periodic_announce %}checked{% endif %}> Periodic announce</label>
+    <label>Interval in minutes<input type="number" name="interval_minutes" min="15" value="{{ settings.interval_minutes }}"></label>
+    <p class="muted">Minimum interval is 15 minutes. LXMF 0.9.6 does not expose a reliable delivered/read receipt for normal messages.</p>
+    <button>Save Identity Settings</button>
+  </section>
+</form>
+<script>
+(() => {
+  const enable = document.getElementById("push-enable");
+  const disable = document.getElementById("push-disable");
+  const status = document.getElementById("push-status");
+  const csrf = {{ csrf_token()|tojson }};
+  const publicKey = {{ status.web_push_public_key|tojson }};
+  const webPushConfigured = {{ status.web_push_configured|tojson }};
+  const contactUrl = document.querySelector('[name="web_push_contact_url"]');
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    status.textContent = "Notifications are not supported in this browser.";
+    enable.hidden = true;
+    return;
+  }
+  const keyBytes = value => Uint8Array.from(atob(value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4)), character => character.charCodeAt(0));
+  navigator.serviceWorker.register("/service-worker.js").then(async registration => {
+    let subscription = await registration.pushManager.getSubscription();
+    const show = () => {
+      const permission = Notification.permission;
+      status.textContent = subscription
+        ? `Permission: ${permission}. Notifications are enabled for this device.`
+        : permission === "denied"
+          ? "Permission is denied. Change it in iPhone or browser notification settings."
+          : `Permission: ${permission}. Notifications are disabled for this device.`;
+      enable.hidden = !!subscription || permission === "denied";
+      disable.hidden = !subscription;
+    };
+    show();
+    enable.addEventListener("click", async () => {
+      if (!webPushConfigured || !contactUrl.value.trim()) { status.textContent = "Save a valid Web Push Contact URL before enabling notifications."; return; }
+      if (!publicKey) { status.textContent = "Notification service is not ready yet."; return; }
+      if (Notification.permission === "denied") { show(); return; }
+      if (await Notification.requestPermission() !== "granted") { status.textContent = "Permission was not granted."; return; }
+      try {
+        subscription = await registration.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: keyBytes(publicKey)});
+        const response = await fetch("/messaging/api/push-subscriptions", {
+          method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({subscription: subscription.toJSON(), csrf_token: csrf})
+        });
+        if (!response.ok) throw new Error("subscription request rejected");
+        show();
+      } catch (_) { status.textContent = "Notifications could not be enabled on this device."; }
+    });
+    disable.addEventListener("click", async () => {
+      if (!subscription) return;
+      try {
+        const response = await fetch("/messaging/api/push-subscriptions", {
+          method: "DELETE", credentials: "same-origin", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({endpoint: subscription.endpoint, csrf_token: csrf})
+        });
+        if (!response.ok) throw new Error("unsubscribe request rejected");
+        await subscription.unsubscribe();
+        subscription = null;
+        show();
+      } catch (_) { status.textContent = "Notifications could not be disabled on this device."; }
+    });
+  }).catch(() => { status.textContent = "Notifications need trusted HTTPS."; });
+})();
+</script>
+{% endblock %}

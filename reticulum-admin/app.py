@@ -16,7 +16,7 @@ from functools import wraps
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from flask import Flask, abort, flash, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, abort, flash, jsonify, redirect, render_template, request, session, url_for, send_from_directory
 from jinja2 import Undefined
 from werkzeug.security import check_password_hash, generate_password_hash
 from reticulum_adapter import find_interface_records, inbound_tcp_child_records
@@ -114,14 +114,26 @@ def bot_status():
     try: return json.loads((BOT_STATUS_DIR / "status.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError): return {"running": False, "shared_instance_connected": False, "lxmf_router_ready": False, "error": "Bot has not reported status yet."}
 
-MESSAGING_DEFAULTS = {"enabled": True, "display_name": "Reticulum Admin User", "announce_on_startup": True, "periodic_announce": False, "interval_minutes": 60}
+MESSAGING_DEFAULTS = {"enabled": True, "display_name": "Reticulum Admin User", "announce_on_startup": True, "periodic_announce": False, "interval_minutes": 60, "web_push_contact_url": ""}
 def messaging_status():
     try: return json.loads((MESSAGING_DIR / "status.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError): return {"running": False, "shared_instance_connected": False, "lxmf_router_ready": False, "error": "Messaging service has not reported status yet."}
-def messaging_settings():
+def messaging_settings_document():
+    """Read the narrow Messaging settings document without discarding future keys."""
     try: value = json.loads((MESSAGING_REQUEST_DIR / "settings.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError): value = {}
+    return value if isinstance(value, dict) else {}
+def messaging_settings():
+    value = messaging_settings_document()
     return {**MESSAGING_DEFAULTS, **{key: value[key] for key in MESSAGING_DEFAULTS if key in value}}
+def valid_web_push_contact_url(value):
+    """Accept only safe public VAPID contact identifiers, never a localhost default."""
+    if not isinstance(value, str) or not value or len(value) > 512 or any(character.isspace() for character in value): return False
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme == "https" and parsed.hostname:
+        host = parsed.hostname.lower()
+        return host not in {"localhost", "127.0.0.1", "::1"} and not host.endswith(".localhost")
+    return parsed.scheme == "mailto" and bool(parsed.path) and "@" in parsed.path and not parsed.netloc
 def messaging_con():
     return sqlite3.connect(f"file:{MESSAGING_DIR / 'messages.db'}?mode=ro", uri=True, timeout=2)
 def messaging_rows(query, values=()):
@@ -226,7 +238,8 @@ def common_values():
     return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "messaging_unread": messaging_unread_count(), "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.9.1")}
 
 def require_csrf():
-    expected, supplied = session.get("csrf"), request.form.get("csrf_token")
+    payload = request.get_json(silent=True) if request.is_json else None
+    expected, supplied = session.get("csrf"), request.form.get("csrf_token") or (payload or {}).get("csrf_token")
     if not expected or not supplied or not secrets.compare_digest(expected, supplied): abort(400, "Invalid form token")
 
 def is_configured():
@@ -1195,6 +1208,21 @@ def topology_graph_api():
     """Narrow, authenticated observation endpoint. It never changes runtime state."""
     return jsonify(network_map_model())
 
+@app.post("/topology/clear-announces")
+@login_required
+def topology_clear_announces():
+    """Ask Messaging to remove only its locally observed public announce history."""
+    require_csrf()
+    if request.form.get("confirmation", "").strip() != "CLEAR ANNOUNCES":
+        flash("Type CLEAR ANNOUNCES to confirm clearing observed announce history.", "error")
+        return redirect(url_for("topology"))
+    request_id = uuid.uuid4().hex
+    # Flask intentionally writes a narrow durable request, never Messaging's
+    # SQLite database. The Messaging service executes the idempotent clear.
+    messaging_request(f"clear-announces-{request_id}.json", {"id": request_id, "action": "clear_observed_announces"})
+    flash("Observed announce history is being cleared. Paths, messages, contacts, identities, and Reticulum configuration are unchanged; new announcements will appear as they are received.", "success")
+    return redirect(url_for("topology"))
+
 @app.route("/nomad", methods=["GET", "POST"])
 @login_required
 def nomad_browser():
@@ -1516,6 +1544,45 @@ def messaging_workspace_api():
     if tab not in ("conversations", "announces"): tab = "conversations"
     return jsonify(messaging_workspace_json(tab, request.args.get("q", "").strip()[:80]))
 
+def valid_push_subscription(value):
+    """Validate only the standard, provider-issued Web Push fields we store."""
+    if not isinstance(value, dict) or set(value) - {"endpoint", "keys", "expirationTime"}: return False
+    endpoint, keys = value.get("endpoint"), value.get("keys")
+    if not isinstance(endpoint, str) or not endpoint.startswith("https://") or len(endpoint) > 2048: return False
+    if not isinstance(keys, dict) or set(keys) != {"p256dh", "auth"}: return False
+    return all(isinstance(keys.get(name), str) and 1 <= len(keys[name]) <= 1024 and re.fullmatch(r"[A-Za-z0-9_-]+", keys[name]) for name in ("p256dh", "auth"))
+
+@app.route("/messaging/api/push-subscriptions", methods=["POST", "DELETE"])
+@login_required
+def messaging_push_subscriptions():
+    require_csrf(); payload = request.get_json(silent=True) or {}
+    if request.method == "POST":
+        subscription = payload.get("subscription")
+        if not valid_push_subscription(subscription): abort(400)
+        # Do not rely on the browser button alone: callers can invoke this
+        # endpoint directly. A saved reviewed GUI value is immediately usable;
+        # the service status also preserves the legacy, read-only environment
+        # fallback for existing installations. The web container never reads
+        # or writes the environment file.
+        saved_contact = messaging_settings().get("web_push_contact_url")
+        legacy_configured = messaging_status().get("web_push_configured") is True
+        if not valid_web_push_contact_url(saved_contact) and not legacy_configured:
+            abort(409, "Save a valid Web Push Contact URL before enabling notifications")
+        messaging_request(f"push-subscribe-{secrets.token_hex(12)}.json", {"subscription": subscription})
+    else:
+        endpoint = payload.get("endpoint")
+        if not isinstance(endpoint, str) or not endpoint.startswith("https://") or len(endpoint) > 2048: abort(400)
+        # This request names precisely the current browser's endpoint; the
+        # service never clears another browser/device's subscription.
+        messaging_request(f"push-unsubscribe-{secrets.token_hex(12)}.json", {"endpoint": endpoint})
+    return "", 202
+
+@app.get("/service-worker.js")
+def service_worker(): return send_from_directory(app.static_folder, "service-worker.js", mimetype="application/javascript")
+
+@app.get("/manifest.webmanifest")
+def web_manifest(): return send_from_directory(app.static_folder, "manifest.webmanifest", mimetype="application/manifest+json")
+
 @app.get("/messaging/api/conversations/<key>")
 @login_required
 def messaging_conversation_api(key):
@@ -1601,9 +1668,14 @@ def messaging_identity():
             interval = request.form.get("interval_minutes", "60")
             try: interval = int(interval)
             except ValueError: interval = 0
-            if interval < 15: flash("Periodic announce interval must be at least 15 minutes.", "error")
+            contact_url = request.form.get("web_push_contact_url", "").strip()
+            if contact_url and not valid_web_push_contact_url(contact_url): flash("Web Push Contact URL must be a valid HTTPS or mailto URI and cannot use localhost.", "error")
+            elif interval < 15: flash("Periodic announce interval must be at least 15 minutes.", "error")
             else:
-                settings = {"enabled": bool(request.form.get("enabled")), "display_name": request.form.get("display_name", "").strip()[:80] or MESSAGING_DEFAULTS["display_name"], "announce_on_startup": bool(request.form.get("announce_on_startup")), "periodic_announce": bool(request.form.get("periodic_announce")), "interval_minutes": interval}
+                # Preserve unrelated future settings while allowing only this
+                # reviewed Web Push contact field to be changed from the UI.
+                settings = messaging_settings_document()
+                settings.update({"enabled": bool(request.form.get("enabled")), "display_name": request.form.get("display_name", "").strip()[:80] or MESSAGING_DEFAULTS["display_name"], "announce_on_startup": bool(request.form.get("announce_on_startup")), "periodic_announce": bool(request.form.get("periodic_announce")), "interval_minutes": interval, "web_push_contact_url": contact_url})
                 messaging_request("settings.json", settings); flash("Messaging identity settings saved.", "success")
         return redirect(url_for("messaging_identity"))
     return render_template("messaging_identity.html", title="My Identity", settings=messaging_settings(), status=messaging_status())

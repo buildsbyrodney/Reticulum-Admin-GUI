@@ -11,6 +11,8 @@ if [ "$VERSION" != "$PROJECT_VERSION" ] || [ "v$VERSION" != "$PROJECT_TAG" ]; th
   exit 1
 fi
 grep -Fx "RETICULUM_ADMIN_VERSION=$VERSION" "$ROOT/.env.example" >/dev/null
+grep -Fx "WEB_PUSH_VAPID_SUBJECT=" "$ROOT/.env.example" >/dev/null
+grep -F 'WEB_PUSH_VAPID_SUBJECT: ${WEB_PUSH_VAPID_SUBJECT:-}' "$ROOT/compose.yaml" >/dev/null
 grep -F "RETICULUM_ADMIN_VERSION: \${RETICULUM_ADMIN_VERSION:-$VERSION}" "$ROOT/compose.yaml" >/dev/null
 grep -F "\"version\":\"$VERSION\"" "$ROOT/release.json" >/dev/null
 ARCHIVE_NAME="reticulum-admin-${VERSION}.tar.gz"
@@ -53,7 +55,8 @@ mkdir -p "$WORK/update"
 cp "$WORK/published/$ARCHIVE_NAME" "$WORK/published/$CHECKSUM_NAME" "$WORK/update/"
 mkdir -p "$WORK/update-extracted/data/messaging" "$WORK/update-extracted/data/messaging-requests" "$WORK/update-extracted/data/nomad" "$WORK/update-extracted/data/nomad-requests"
 printf '%s\n' 'persistent-messaging-identity' > "$WORK/update-extracted/data/messaging/identity"
-python3 -c 'import sqlite3,sys; con=sqlite3.connect(sys.argv[1]); con.executescript("CREATE TABLE messages(body TEXT); CREATE TABLE contacts(name TEXT); CREATE TABLE announced_peers(display_name TEXT);"); con.execute("INSERT INTO messages VALUES (\"existing message\")"); con.execute("INSERT INTO contacts VALUES (\"Existing contact\")"); con.execute("INSERT INTO announced_peers VALUES (\"Existing announced peer\")"); con.commit()' "$WORK/update-extracted/data/messaging/messages.db"
+printf '%s\n' 'persistent-vapid-private-key' > "$WORK/update-extracted/data/messaging/webpush-vapid.pem"
+python3 -c 'import sqlite3,sys; con=sqlite3.connect(sys.argv[1]); con.executescript("CREATE TABLE messages(body TEXT); CREATE TABLE contacts(name TEXT); CREATE TABLE announced_peers(display_name TEXT); CREATE TABLE push_subscriptions(endpoint TEXT);"); con.execute("INSERT INTO messages VALUES (\"existing message\")"); con.execute("INSERT INTO contacts VALUES (\"Existing contact\")"); con.execute("INSERT INTO announced_peers VALUES (\"Existing announced peer\")"); con.execute("INSERT INTO push_subscriptions VALUES (\"https://push.example/existing-device\")"); con.commit()' "$WORK/update-extracted/data/messaging/messages.db"
 printf '%s\n' 'persistent-messaging-request' > "$WORK/update-extracted/data/messaging-requests/outbound-test.json"
 printf '%s\n' 'persistent-nomad-cache' > "$WORK/update-extracted/data/nomad/cache-marker"
 printf '%s\n' 'persistent-nomad-request' > "$WORK/update-extracted/data/nomad-requests/browse-test.json"
@@ -62,7 +65,8 @@ printf '%s\n' 'persistent-reticulum-config' > "$WORK/update-extracted/data/retic
 printf '%s\n' 'persistent-bot-identity' > "$WORK/update-extracted/data/bot/identity"
 verify_and_extract "$WORK/update" "$WORK/update-extracted"
 test "$(cat "$WORK/update-extracted/data/messaging/identity")" = "persistent-messaging-identity"
-python3 -c 'import sqlite3,sys; con=sqlite3.connect(sys.argv[1]); assert con.execute("SELECT body FROM messages").fetchone()[0] == "existing message"; assert con.execute("SELECT name FROM contacts").fetchone()[0] == "Existing contact"; assert con.execute("SELECT display_name FROM announced_peers").fetchone()[0] == "Existing announced peer"' "$WORK/update-extracted/data/messaging/messages.db"
+test "$(cat "$WORK/update-extracted/data/messaging/webpush-vapid.pem")" = "persistent-vapid-private-key"
+python3 -c 'import sqlite3,sys; con=sqlite3.connect(sys.argv[1]); assert con.execute("SELECT body FROM messages").fetchone()[0] == "existing message"; assert con.execute("SELECT name FROM contacts").fetchone()[0] == "Existing contact"; assert con.execute("SELECT display_name FROM announced_peers").fetchone()[0] == "Existing announced peer"; assert con.execute("SELECT endpoint FROM push_subscriptions").fetchone()[0] == "https://push.example/existing-device"' "$WORK/update-extracted/data/messaging/messages.db"
 test "$(cat "$WORK/update-extracted/data/messaging-requests/outbound-test.json")" = "persistent-messaging-request"
 test "$(cat "$WORK/update-extracted/data/nomad/cache-marker")" = "persistent-nomad-cache"
 test "$(cat "$WORK/update-extracted/data/nomad-requests/browse-test.json")" = "persistent-nomad-request"
@@ -79,6 +83,7 @@ grep -F 'nomad-browser' "$ROOT/scripts/build-release.sh" >/dev/null
 # identify the newly unpacked release rather than a stale .env value.
 grep -F 'RETICULUM_ADMIN_VERSION=$APP_VERSION' "$ROOT/install.sh" >/dev/null
 grep -F 'sed "s/^RETICULUM_ADMIN_VERSION=.*/RETICULUM_ADMIN_VERSION=$APP_VERSION/"' "$ROOT/install.sh" >/dev/null
+grep -F "if ! grep -q '^WEB_PUSH_VAPID_SUBJECT=' \"\$ROOT/.env\"; then" "$ROOT/install.sh" >/dev/null
 # Updating retains intentional tuning, but migrates the former shipped restart
 # defaults so an old .env cannot reintroduce the short verification budget.
 grep -F 'upgrade_timeout_default RESTART_HEALTH_TIMEOUT 35 70' "$ROOT/install.sh" >/dev/null

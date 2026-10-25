@@ -1,16 +1,42 @@
 """Persistent, non-administrative LXMF endpoint for the web Messaging UI."""
-import json, os, re, sqlite3, time, uuid
+import base64, json, os, re, sqlite3, time, uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 STATE = Path(os.environ.get("MESSAGING_STATE_DIR", "/messaging"))
 REQUESTS = Path(os.environ.get("MESSAGING_REQUEST_DIR", "/requests"))
 RETICULUM_READY = Path("/reticulum/admin-status/rnsd.ready")
-DEFAULTS = {"enabled": True, "display_name": "Reticulum Admin User", "announce_on_startup": True, "periodic_announce": False, "interval_minutes": 60}
+DEFAULTS = {"enabled": True, "display_name": "Reticulum Admin User", "announce_on_startup": True, "periodic_announce": False, "interval_minutes": 60, "web_push_contact_url": ""}
 MIN_INTERVAL, MAX_BODY = 15, 4000
 PATH_LOOKUP_SECONDS = max(1, min(30, int(os.environ.get("MESSAGING_PATH_LOOKUP_SECONDS", "10"))))
 DESTINATION_RE = re.compile(r"[0-9a-fA-F]{32}")
 TERMINAL_OUTBOUND_STATES = {"Delivered", "Failed"}
 APPLICATION_ASPECTS = ("lxmf.delivery", "lxmf.propagation", "nomadnetwork.node")
+PUSH_DIAGNOSTICS_DEFAULTS = {"last_push_attempt": None, "last_provider_result": None, "last_provider_http_status": None, "last_provider_accepted": None, "push_attempts": 0, "provider_accepts": 0, "provider_failures": 0, "stale_subscriptions_removed": 0}
+
+def vapid_subject():
+    """Return the reviewed GUI contact URI or legacy environment value.
+
+    The contact URI is public VAPID metadata, but it is intentionally scoped to
+    this one Messaging setting. It is not a generic environment editor.
+    """
+    value = str(settings().get("web_push_contact_url") or os.environ.get("WEB_PUSH_VAPID_SUBJECT", "")).strip()
+    if not value or len(value) > 512 or any(character.isspace() for character in value): return None
+    parsed = urlparse(value)
+    if parsed.scheme == "https" and parsed.hostname:
+        hostname = parsed.hostname.lower()
+        if hostname not in {"localhost", "127.0.0.1", "::1"} and not hostname.endswith(".localhost"):
+            return value
+    if parsed.scheme == "mailto" and parsed.path and "@" in parsed.path and not parsed.netloc:
+        return value
+    return None
+
+def push_navigate_url(destination):
+    """Prefer the configured HTTPS origin for declarative notification taps."""
+    subject = vapid_subject()
+    parsed = urlparse(subject or "")
+    path = "/messaging/conversations/" + destination.lower()
+    return f"{parsed.scheme}://{parsed.netloc}{path}" if parsed.scheme == "https" else path
 
 def atomic_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True); tmp = path.with_suffix(path.suffix + ".tmp")
@@ -32,6 +58,8 @@ def connect():
       CREATE TABLE IF NOT EXISTS contacts (id INTEGER PRIMARY KEY, name TEXT NOT NULL, destination TEXT NOT NULL UNIQUE, notes TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS announced_peers (destination_hash TEXT PRIMARY KEY, identity_hash TEXT, display_name TEXT, message_display_name TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, last_hops INTEGER, announce_count INTEGER NOT NULL DEFAULT 1);
       CREATE TABLE IF NOT EXISTS application_announces (destination_hash TEXT NOT NULL, aspect TEXT NOT NULL, identity_hash TEXT, display_name TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, last_hops INTEGER, announce_count INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(destination_hash, aspect));
+      CREATE TABLE IF NOT EXISTS push_subscriptions (endpoint TEXT PRIMARY KEY, subscription_json TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS inbound_message_ids (source_message_id TEXT PRIMARY KEY, received_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS messages_conversation_idx ON messages(conversation_key, received_at);
       CREATE INDEX IF NOT EXISTS announced_peers_last_seen_idx ON announced_peers(last_seen DESC);
       CREATE INDEX IF NOT EXISTS announced_peers_display_name_idx ON announced_peers(display_name);
@@ -41,6 +69,31 @@ def connect():
     try: con.execute("ALTER TABLE announced_peers ADD COLUMN message_display_name TEXT")
     except sqlite3.OperationalError: pass
     return con
+
+def web_push_preview(value):
+    """A short, plain-text preview suitable for a provider-visible payload."""
+    text = re.sub(r"<[^>]*>", "", str(value or ""))
+    text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    return " ".join(re.sub(r"[`*_~>#]", "", text).split())[:140]
+
+def subscription_is_valid(subscription):
+    if not isinstance(subscription, dict) or set(subscription) - {"endpoint", "keys", "expirationTime"}: return False
+    endpoint, keys = subscription.get("endpoint"), subscription.get("keys")
+    if not isinstance(endpoint, str) or not endpoint.startswith("https://") or len(endpoint) > 2048: return False
+    if not isinstance(keys, dict) or set(keys) != {"p256dh", "auth"}: return False
+    return all(isinstance(keys.get(name), str) and 1 <= len(keys[name]) <= 1024 and re.fullmatch(r"[A-Za-z0-9_-]+", keys[name]) for name in ("p256dh", "auth"))
+
+def stable_message_id(message):
+    """Use LXMF's message hash when exposed; never notify twice for that hash."""
+    value = getattr(message, "hash", None) or getattr(message, "message_hash", None)
+    if isinstance(value, bytes): return value.hex()
+    if hasattr(value, "hex"): return value.hex()
+    return str(value) if value else None
+
+def push_diagnostics():
+    try: value = json.loads((STATE / "webpush-diagnostics.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError): value = {}
+    return {**PUSH_DIAGNOSTICS_DEFAULTS, **{key: value[key] for key in PUSH_DIAGNOSTICS_DEFAULTS if key in value}}
 
 class ApplicationAnnounceHandler:
     """Passive observer for one documented Reticulum application aspect."""
@@ -55,15 +108,38 @@ class Messaging:
         # retries interrupted Pending/Queued rows once, since LXMF callbacks
         # do not survive a service restart.
         self.session_id = uuid.uuid4().hex; self.inflight_message_ids = set()
-        self.state = {"last_message_received": None, "last_message_sent": None, "last_error": None, "last_announce": None, "last_lxmf_delivery_announce": None, "lxmf_delivery_announces_observed": 0, "last_application_announce": None, "application_announces_observed": 0, "application_announce_counts": {aspect: 0 for aspect in APPLICATION_ASPECTS}}
+        self.state = {"last_message_received": None, "last_message_sent": None, "last_error": None, "last_announce": None, "last_lxmf_delivery_announce": None, "lxmf_delivery_announces_observed": 0, "last_application_announce": None, "application_announces_observed": 0, "application_announce_counts": {aspect: 0 for aspect in APPLICATION_ASPECTS}, **push_diagnostics()}
+        self.vapid_public_key = None
+    def ensure_vapid_key(self):
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat, load_pem_private_key
+        key = STATE / "webpush-vapid.pem"
+        private = load_pem_private_key(key.read_bytes(), None) if key.exists() else ec.generate_private_key(ec.SECP256R1())
+        if not key.exists(): key.write_bytes(private.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())); os.chmod(key, 0o600)
+        else: os.chmod(key, 0o600)
+        self.vapid_public_key = base64.urlsafe_b64encode(private.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)).rstrip(b"=").decode()
     def status(self, ready=False):
         with connect() as con:
             pending = con.execute("SELECT count(*) FROM messages WHERE direction='outbound' AND delivery_state IN ('Pending','Queued')").fetchone()[0]
             stored_peers = con.execute("SELECT count(*) FROM announced_peers WHERE announce_count > 0").fetchone()[0]
             unique_destinations = con.execute("SELECT count(DISTINCT destination_hash) FROM application_announces").fetchone()[0]
-        atomic_json(STATE / "status.json", {"running": ready, "process_running": True, "shared_instance_connected": ready, "lxmf_router_ready": bool(self.router), "announce_listener_registered": bool(self.announce_handlers), "identity_loaded": bool(self.identity), "destination": self.destination.hash.hex() if self.destination else None, "identity": self.identity.hash.hex() if self.identity else None, "display_name": settings()["display_name"], "uptime_seconds": int(time.time())-self.started, "pending_outbound": pending, "unique_lxmf_delivery_peers": stored_peers, "unique_application_announce_destinations": unique_destinations, **self.state})
+        subject = vapid_subject()
+        atomic_json(STATE / "status.json", {"running": ready, "process_running": True, "shared_instance_connected": ready, "lxmf_router_ready": bool(self.router), "announce_listener_registered": bool(self.announce_handlers), "identity_loaded": bool(self.identity), "destination": self.destination.hash.hex() if self.destination else None, "identity": self.identity.hash.hex() if self.identity else None, "display_name": settings()["display_name"], "web_push_public_key": self.vapid_public_key, "web_push_configured": bool(subject), "web_push_subject": subject, "uptime_seconds": int(time.time())-self.started, "pending_outbound": pending, "unique_lxmf_delivery_peers": stored_peers, "unique_application_announce_destinations": unique_destinations, **self.state})
     def announce(self):
         self.router.announce(self.destination.hash); self.state["last_announce"] = int(time.time()); self.state["last_error"] = None
+    def record_push_result(self, result, http_status=None, accepted=False, stale_removed=False, attempted=True):
+        """Persist bounded provider observations, never payloads or endpoints."""
+        stamp = int(time.time())
+        if attempted: self.state["last_push_attempt"] = stamp
+        self.state["last_provider_result"] = result
+        self.state["last_provider_http_status"] = http_status
+        if attempted: self.state["push_attempts"] += 1
+        if accepted:
+            self.state["provider_accepts"] += 1; self.state["last_provider_accepted"] = stamp
+        elif result not in {"Configuration error"}:
+            self.state["provider_failures"] += 1
+        if stale_removed: self.state["stale_subscriptions_removed"] += 1
+        atomic_json(STATE / "webpush-diagnostics.json", {key: self.state[key] for key in PUSH_DIAGNOSTICS_DEFAULTS})
     def receive(self, message):
         source = getattr(message, "source", None); source_hash = getattr(message, "source_hash", None) or getattr(source, "hash", None)
         if not settings()["enabled"] or not source_hash or (self.destination and source_hash == self.destination.hash): return
@@ -74,13 +150,51 @@ class Messaging:
         if not isinstance(sender_name, str) or not sender_name.strip(): sender_name = None
         elif len(sender_name.strip()) > 80: sender_name = sender_name.strip()[:80]
         else: sender_name = sender_name.strip()
+        source_id = stable_message_id(message)
         with connect() as con:
+            # A replayed LXMF callback must not create another row or another
+            # provider notification. Older LXMF objects without a hash remain
+            # safely accepted once, but cannot be proven duplicate here.
+            if source_id and con.execute("INSERT OR IGNORE INTO inbound_message_ids(source_message_id,received_at) VALUES(?,?)", (source_id, stamp)).rowcount != 1:
+                return
+            contact = con.execute("SELECT name FROM contacts WHERE destination=?", (sender.lower(),)).fetchone() if DESTINATION_RE.fullmatch(sender) else None
+            announced = con.execute("SELECT display_name,message_display_name FROM announced_peers WHERE destination_hash=?", (sender.lower(),)).fetchone() if DESTINATION_RE.fullmatch(sender) else None
+            push_sender = ((contact["name"] if contact else None) or sender_name or (announced["display_name"] if announced else None) or (announced["message_display_name"] if announced else None) or sender[:12])
             con.execute("INSERT INTO messages(id,conversation_key,direction,sender_destination,recipient_destination,sender_name,body,received_at,delivery_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (uuid.uuid4().hex, sender, "inbound", sender, self.destination.hash.hex(), sender_name, body, stamp, "Received", stamp, stamp))
             # Message-provided names are informational only. They are retained
             # separately so a later LXMF announce remains the preferred name.
             if DESTINATION_RE.fullmatch(sender) and sender_name:
                 con.execute("INSERT INTO announced_peers(destination_hash,message_display_name,first_seen,last_seen,last_hops,announce_count) VALUES(?,?,?,?,?,0) ON CONFLICT(destination_hash) DO UPDATE SET message_display_name=excluded.message_display_name", (sender.lower(), sender_name, stamp, stamp, None))
         self.state["last_message_received"] = stamp; self.state["last_error"] = None
+        self.send_push(push_sender, body, sender)
+
+    def send_push(self, sender, body, destination):
+        subject = vapid_subject()
+        if not subject:
+            self.state["last_error"] = "Web Push is not configured: save a valid Web Push Contact URL."
+            self.record_push_result("Configuration error", attempted=False)
+            return
+        try:
+            from pywebpush import WebPushException, webpush
+            with connect() as con:
+                rows = con.execute("SELECT endpoint,subscription_json FROM push_subscriptions").fetchall()
+                unread = con.execute("SELECT count(*) FROM messages WHERE direction='inbound' AND read_at IS NULL").fetchone()[0]
+            navigate = push_navigate_url(destination)
+            payload = json.dumps({"web_push": 8030, "notification": {"title": (sender or "Reticulum Admin")[:80], "body": web_push_preview(body), "tag": "conversation-" + destination.lower(), "navigate": navigate, "silent": False}, "app_badge": str(unread)})
+            for row in rows:
+                try:
+                    response = webpush(json.loads(row["subscription_json"]), data=payload, vapid_private_key=str(STATE / "webpush-vapid.pem"), vapid_claims={"sub": subject}, ttl=120)
+                    self.record_push_result("Accepted", getattr(response, "status_code", 201), accepted=True)
+                except WebPushException as error:
+                    status = getattr(getattr(error, "response", None), "status_code", None)
+                    stale = status in (404, 410)
+                    if stale:
+                        with connect() as con: con.execute("DELETE FROM push_subscriptions WHERE endpoint=?", (row["endpoint"],))
+                    self.record_push_result("Rejected", status, stale_removed=stale)
+        except Exception:
+            # Never include subscription material or message text in status.
+            self.state["last_error"] = "Web Push notification delivery failed"
+            self.record_push_result("Failed")
 
     def receive_announce(self, destination_hash, announced_identity=None, app_data=None):
         """Compatibility entry point for the existing LXMF delivery observer."""
@@ -215,8 +329,39 @@ class Messaging:
         except Exception:
             self.update_outbound(message_id, "Failed", "LXMF submission failed.")
         return True
-    def process_requests(self):
+    def process_announce_clear_requests(self):
+        """Process the safe local-history clear even when messaging is disabled."""
         REQUESTS.mkdir(parents=True, exist_ok=True)
+        # This deliberately clears only public, locally observed announce
+        # metadata. It is processed here rather than by the web application so
+        # Messaging remains the sole SQLite writer. Replaying the request is
+        # harmless: both deletes are idempotent.
+        for request in sorted(REQUESTS.glob("clear-announces-*.json")):
+            try:
+                item = json.loads(request.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if item.get("action") != "clear_observed_announces" or not isinstance(item.get("id"), str):
+                continue
+            with connect() as con:
+                con.execute("DELETE FROM announced_peers")
+                con.execute("DELETE FROM application_announces")
+            request.unlink(missing_ok=True)
+
+    def process_requests(self):
+        self.process_announce_clear_requests()
+        for request in sorted(REQUESTS.glob("push-subscribe-*.json")):
+            try: item=json.loads(request.read_text()); sub=item["subscription"]; endpoint=sub["endpoint"]
+            except (OSError,json.JSONDecodeError,KeyError,TypeError): continue
+            if subscription_is_valid(sub):
+                with connect() as con: con.execute("INSERT INTO push_subscriptions(endpoint,subscription_json,created_at,updated_at) VALUES(?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET subscription_json=excluded.subscription_json,updated_at=excluded.updated_at",(endpoint,json.dumps(sub),int(time.time()),int(time.time())))
+                request.unlink(missing_ok=True)
+        for request in sorted(REQUESTS.glob("push-unsubscribe-*.json")):
+            try: endpoint=json.loads(request.read_text())["endpoint"]
+            except (OSError,json.JSONDecodeError,KeyError,TypeError): continue
+            if isinstance(endpoint, str) and endpoint.startswith("https://") and len(endpoint) <= 2048:
+                with connect() as con: con.execute("DELETE FROM push_subscriptions WHERE endpoint=?", (endpoint,))
+                request.unlink(missing_ok=True)
         for request in sorted(REQUESTS.glob("outbound-*.json")):
             try: item = json.loads(request.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError): continue
@@ -249,6 +394,7 @@ class Messaging:
         while not RETICULUM_READY.exists(): self.status(False); time.sleep(2)
         RNS.Reticulum(configdir="/reticulum", require_shared_instance=True)
         identity_file = STATE / "identity"
+        self.ensure_vapid_key()
         self.identity = RNS.Identity.from_file(str(identity_file)) if identity_file.exists() else RNS.Identity()
         if not identity_file.exists(): self.identity.to_file(str(identity_file)); os.chmod(identity_file, 0o600)
         self.router = LXMF.LXMRouter(storagepath=str(STATE / "lxmf")); self.destination = self.router.register_delivery_identity(self.identity, display_name=settings()["display_name"]); self.router.register_delivery_callback(self.receive)
@@ -264,6 +410,10 @@ class Messaging:
                     self.recover_interrupted_outbound(); recovery_attempted = True
                 if current_settings["enabled"] and current_settings["announce_on_startup"] and not announced: self.announce(); announced = True; last_periodic = current
                 if current_settings["enabled"] and current_settings["periodic_announce"] and current-last_periodic >= current_settings["interval_minutes"]*60: self.announce(); last_periodic = current
+                # Clearing locally retained public observations does not send
+                # or receive LXMF traffic, so it remains available even when
+                # the operator has disabled Messaging.
+                self.process_announce_clear_requests()
                 if current_settings["enabled"]: self.process_requests()
                 self.status(True); time.sleep(2)
             except Exception: self.state["last_error"] = "Messaging runtime error"; self.status(False); time.sleep(5)

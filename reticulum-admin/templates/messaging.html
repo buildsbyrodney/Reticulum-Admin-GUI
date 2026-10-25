@@ -78,6 +78,9 @@
     function updateUnread(total) {
       const nav = document.querySelector('nav a[href="/messaging"]');
       if (nav) nav.textContent = total ? "Messaging (" + total + ")" : "Messaging";
+      if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({type: "foreground-unread", unread: Number(total) || 0});
+      }
     }
     function renderList(data) {
       if (!list) return;

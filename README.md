@@ -123,6 +123,8 @@ Messaging groups stored messages into Conversations. The Messaging → Announces
 
 The Messaging service also observes the documented public `lxmf.propagation` and `nomadnetwork.node` announce aspects for Network Map enrichment. NomadNet node app data is decoded only as NomadNet’s documented UTF-8 node name; propagation announces are classified without inventing a friendly name. These observations remain informational and read-only.
 
+If a large number of past public announces makes **Network Map** difficult to use, its **Clear observed announce history** action removes only the local `lxmf.delivery`, propagation, and NomadNet observation records. It does not remove Reticulum paths, private messages, Contacts, Bot or Messaging identities, or Reticulum configuration. New public announces will appear again as they are received; historical announces are not replayed. The action is performed by the Messaging service and does not restart Reticulum or Docker containers.
+
 The chat workspace uses small authenticated read-only polls instead of WebSockets: roughly every two seconds just after sending, then about every five seconds while viewing. This lets queued messages, delivery changes, new inbound messages, unread badges, and new announces appear without a manual refresh. It works with the normal page flow when JavaScript is unavailable and is designed to remain usable in mobile Safari.
 
 Names are presentation hints, not authentication. A saved Contact name takes precedence, followed by the latest public LXMF announce name, then a display name supplied by an incoming message when the pinned runtime exposes one, then a shortened destination hash. The Messaging service only records delivery announces it receives after it starts. With the pinned RNS/LXMF APIs there is no supported safe enumeration of historic announce app-data, so it does not scrape logs or invent peers that another client may have retained.
@@ -131,7 +133,37 @@ The workspace adapts for phones and iPhone Safari: narrow screens show the conve
 
 If the messaging service restarts while an outbound message is Pending or Queued, it retries that same stored message once when the new service process starts. Delivered and Failed messages are never resent automatically. LXMF 0.9.6 does not provide a durable exactly-once transaction shared with the local message database, so an abrupt crash at the exact delivery boundary can theoretically result in a duplicate network delivery; retrying is preferred to silently losing a queued message.
 
-My Identity is separate from the Test Echo Bot. Messages persist locally under `data/messaging/`; they are not copied into Timeline, Diagnostics, or generic logs. The server must be running to receive direct messages. v0.7.2 does not add phone push notifications, attachments, group chat, or remote administration through LXMF messages. LXMF clients can cache a display name until a later announce or rediscovery.
+My Identity is separate from the Test Echo Bot. Messages persist locally under `data/messaging/`; they are not copied into Timeline, Diagnostics, or generic logs. The server must be running to receive direct messages. LXMF clients can cache a display name until a later announce or rediscovery.
+
+### Web Push notifications (v0.9.2)
+
+Web Push notifications are an explicit, per-browser or per-Home-Screen-app opt-in in **Messaging → My Identity**. Configure **Web Push Contact URL** there before enabling notifications. This public **VAPID subject** identifies the Reticulum Admin server to push providers; it accepts only a real `https://` URL or valid `mailto:` URI. Blank, HTTP, localhost, and malformed values are rejected, with no localhost fallback. The setting is stored in the existing persistent Messaging settings document, so it survives container rebuilds and installer updates without granting the web app general `.env` access. Existing installations may retain `WEB_PUSH_VAPID_SUBJECT` in `.env` as a compatibility fallback; a saved GUI value takes precedence.
+
+Web Push notifications in v0.9.2 are currently validated and supported for iPhone and iPad Home Screen web apps on iOS/iPadOS 16.4 or newer and trusted HTTPS. Other browsers may support standards-based Web Push, but they are not yet part of the supported/validated test matrix for this release.
+
+#### iPhone and iPad setup
+
+1. Make Reticulum Admin reachable at a trusted HTTPS URL. If using Tailscale, configure Tailscale Serve for the Admin GUI.
+2. Run `tailscale serve status` and copy the exact HTTPS origin it reports. For the verified deployment, that origin is **`https://fserver.tailfde88c.ts.net`**. The earlier typo `https://fserver.tail.de88c.ts.net` is not the same hostname and causes notification taps to fail. **Do not guess or manually construct the tailnet hostname.**
+3. In **Messaging → My Identity**, enter that exact origin as **Web Push Contact URL**, then save the Identity settings. A `mailto:` contact is also valid, but an HTTPS origin provides the best notification-tap destination.
+4. Open Reticulum Admin in Safari on the iPhone or iPad, choose **Add to Home Screen**, then launch it from the new Home Screen icon.
+5. Open **Messaging → My Identity**, tap **Enable Notifications**, and accept the iOS permission prompt. Confirm that the page says permission is granted and this device is enabled.
+6. Background the app rather than force-quitting it during initial testing. Send a new inbound LXMF message to the Messaging identity, confirm the sender-and-preview banner, then tap it to open the conversation.
+
+Apple can deliver the push while Tailscale is disconnected. Tailscale must be connected to open a private Admin GUI that is only available through the tailnet. When a notification tap cannot reach the Admin GUI, the cached PWA page says **Connect Tailscale, then tap Retry.** Retry tests Admin GUI reachability and opens the intended conversation when it returns; it does not inspect or enable the VPN.
+
+| Symptom | What to check |
+| --- | --- |
+| Permission is not requested | Launch the Home Screen app and tap **Enable Notifications**. |
+| Permission is denied | Enable Reticulum Admin notifications in iOS Settings, then return to the Home Screen app. |
+| Push provider rejects a request | Check the saved Web Push Contact URL / VAPID subject. |
+| Banner arrives but tapping it fails | Verify the exact HTTPS hostname from `tailscale serve status` and Tailscale reachability. |
+| Provider says Accepted but no banner appears | Confirm the Home Screen app, iOS notification settings, and service-worker update state. **Accepted by push provider** does not mean displayed on iPhone. |
+| A subscription is stale | Disable and re-enable notifications for that device only. |
+
+The Messaging service stores its VAPID key at `data/messaging/webpush-vapid.pem` with owner-only permissions and stores each provider subscription in the Messaging SQLite database. Installer updates preserve the VAPID key and subscriptions; devices do not need to re-grant permission unless the subscription itself is stale. The private key and browser subscription secrets are never returned by the Admin GUI. A new inbound LXMF message, once durably stored, can send a bounded plain-text sender/preview notification; outbound messages, state changes, and read/unread activity do not. Attachments, group chat, and remote administration through LXMF messages remain out of scope.
+
+The push payload follows WebKit’s Declarative Web Push format (`web_push: 8030`), while the installed service worker provides the compatible replacement/fallback notification path for older browsers. Messaging records only bounded provider-side diagnostics: attempts, accepted/rejected result, HTTP status, and stale-subscription removals. “Accepted by push provider” is not a claim that an iPhone displayed a notification. Foreground unread refreshes can also update an app badge, so a badge change alone is not evidence of background push receipt. The service worker does not send unauthenticated telemetry to the server; client receipt cannot be proven by the server.
 
 ```sh
 docker compose ps
