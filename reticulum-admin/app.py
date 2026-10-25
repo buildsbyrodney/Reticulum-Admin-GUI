@@ -1559,6 +1559,15 @@ def messaging_push_subscriptions():
     if request.method == "POST":
         subscription = payload.get("subscription")
         if not valid_push_subscription(subscription): abort(400)
+        # Do not rely on the browser button alone: callers can invoke this
+        # endpoint directly. A saved reviewed GUI value is immediately usable;
+        # the service status also preserves the legacy, read-only environment
+        # fallback for existing installations. The web container never reads
+        # or writes the environment file.
+        saved_contact = messaging_settings().get("web_push_contact_url")
+        legacy_configured = messaging_status().get("web_push_configured") is True
+        if not valid_web_push_contact_url(saved_contact) and not legacy_configured:
+            abort(409, "Save a valid Web Push Contact URL before enabling notifications")
         messaging_request(f"push-subscribe-{secrets.token_hex(12)}.json", {"subscription": subscription})
     else:
         endpoint = payload.get("endpoint")

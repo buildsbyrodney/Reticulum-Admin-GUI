@@ -38,6 +38,7 @@
   <button type="button" id="push-enable">Enable Notifications</button>
   <button type="button" id="push-disable" hidden>Disable Notifications</button>
   <p class="muted">Notifications are enabled separately on each browser or Home Screen app. On iOS/iPadOS 16.4 or newer, notifications require the Admin GUI to be installed to the Home Screen.</p>
+  <p class="muted">Provider diagnostics describe the provider response only. “Accepted” does not confirm that a device displayed a banner.</p>
   {% if not status.web_push_configured %}<p class="muted">Save a valid Web Push Contact URL below before enabling notifications on this device.</p>{% endif %}
 </section>
 <form class="card" method="post">

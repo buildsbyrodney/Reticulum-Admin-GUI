@@ -144,7 +144,7 @@ Web Push notifications in v0.9.2 are currently validated and supported for iPhon
 #### iPhone and iPad setup
 
 1. Make Reticulum Admin reachable at a trusted HTTPS URL. If using Tailscale, configure Tailscale Serve for the Admin GUI.
-2. Run `tailscale serve status` and copy the exact HTTPS origin it reports. **Do not guess or manually construct the tailnet hostname.**
+2. Run `tailscale serve status` and copy the exact HTTPS origin it reports. For the verified deployment, that origin is **`https://fserver.tailfde88c.ts.net`**. The earlier typo `https://fserver.tail.de88c.ts.net` is not the same hostname and causes notification taps to fail. **Do not guess or manually construct the tailnet hostname.**
 3. In **Messaging → My Identity**, enter that exact origin as **Web Push Contact URL**, then save the Identity settings. A `mailto:` contact is also valid, but an HTTPS origin provides the best notification-tap destination.
 4. Open Reticulum Admin in Safari on the iPhone or iPad, choose **Add to Home Screen**, then launch it from the new Home Screen icon.
 5. Open **Messaging → My Identity**, tap **Enable Notifications**, and accept the iOS permission prompt. Confirm that the page says permission is granted and this device is enabled.
