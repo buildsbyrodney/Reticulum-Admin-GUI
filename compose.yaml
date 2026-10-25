@@ -119,6 +119,7 @@ services:
     environment:
       MESSAGING_STATE_DIR: /messaging
       MESSAGING_REQUEST_DIR: /requests
+      WEB_PUSH_VAPID_SUBJECT: ${WEB_PUSH_VAPID_SUBJECT:-}
     volumes:
       - ./data/reticulum:/reticulum:ro
       - ./data/messaging:/messaging

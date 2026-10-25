@@ -1,0 +1,13 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reticulum Admin</title>
+<style>body{margin:2rem;font:18px system-ui;background:#0f172a;color:#e5e7eb}button{padding:.7rem 1rem}</style>
+<h1>Reticulum Admin</h1>
+<p>Connect Tailscale, then tap Retry.</p>
+<button id="retry">Retry</button>
+<script>
+  const target = new URLSearchParams(location.search).get("target") || "/messaging";
+  document.getElementById("retry").addEventListener("click", async () => {
+    try { const response = await fetch(target, {cache: "no-store", credentials: "include"}); if (response.ok || response.redirected) location.replace(target); } catch (_) { /* still unreachable */ }
+  });
+</script>

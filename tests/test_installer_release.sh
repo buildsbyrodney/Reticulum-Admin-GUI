@@ -11,6 +11,8 @@ if [ "$VERSION" != "$PROJECT_VERSION" ] || [ "v$VERSION" != "$PROJECT_TAG" ]; th
   exit 1
 fi
 grep -Fx "RETICULUM_ADMIN_VERSION=$VERSION" "$ROOT/.env.example" >/dev/null
+grep -Fx "WEB_PUSH_VAPID_SUBJECT=" "$ROOT/.env.example" >/dev/null
+grep -F 'WEB_PUSH_VAPID_SUBJECT: ${WEB_PUSH_VAPID_SUBJECT:-}' "$ROOT/compose.yaml" >/dev/null
 grep -F "RETICULUM_ADMIN_VERSION: \${RETICULUM_ADMIN_VERSION:-$VERSION}" "$ROOT/compose.yaml" >/dev/null
 grep -F "\"version\":\"$VERSION\"" "$ROOT/release.json" >/dev/null
 ARCHIVE_NAME="reticulum-admin-${VERSION}.tar.gz"
@@ -79,6 +81,7 @@ grep -F 'nomad-browser' "$ROOT/scripts/build-release.sh" >/dev/null
 # identify the newly unpacked release rather than a stale .env value.
 grep -F 'RETICULUM_ADMIN_VERSION=$APP_VERSION' "$ROOT/install.sh" >/dev/null
 grep -F 'sed "s/^RETICULUM_ADMIN_VERSION=.*/RETICULUM_ADMIN_VERSION=$APP_VERSION/"' "$ROOT/install.sh" >/dev/null
+grep -F "if ! grep -q '^WEB_PUSH_VAPID_SUBJECT=' \"\$ROOT/.env\"; then" "$ROOT/install.sh" >/dev/null
 # Updating retains intentional tuning, but migrates the former shipped restart
 # defaults so an old .env cannot reintroduce the short verification budget.
 grep -F 'upgrade_timeout_default RESTART_HEALTH_TIMEOUT 35 70' "$ROOT/install.sh" >/dev/null

@@ -16,7 +16,7 @@ from functools import wraps
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from flask import Flask, abort, flash, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, abort, flash, jsonify, redirect, render_template, request, session, url_for, send_from_directory
 from jinja2 import Undefined
 from werkzeug.security import check_password_hash, generate_password_hash
 from reticulum_adapter import find_interface_records, inbound_tcp_child_records
@@ -226,7 +226,8 @@ def common_values():
     return {"csrf_token": csrf_token, "access_mode": os.environ.get("ADMIN_ACCESS_MODE", "local"), "server_timezone": TIMEZONE_NAME, "format_time": format_time, "format_bytes": format_bytes, "messaging_unread": messaging_unread_count(), "app_version": os.environ.get("RETICULUM_ADMIN_VERSION", "0.9.1")}
 
 def require_csrf():
-    expected, supplied = session.get("csrf"), request.form.get("csrf_token")
+    payload = request.get_json(silent=True) if request.is_json else None
+    expected, supplied = session.get("csrf"), request.form.get("csrf_token") or (payload or {}).get("csrf_token")
     if not expected or not supplied or not secrets.compare_digest(expected, supplied): abort(400, "Invalid form token")
 
 def is_configured():
@@ -1530,6 +1531,36 @@ def messaging_workspace_api():
     tab = request.args.get("tab", "conversations")
     if tab not in ("conversations", "announces"): tab = "conversations"
     return jsonify(messaging_workspace_json(tab, request.args.get("q", "").strip()[:80]))
+
+def valid_push_subscription(value):
+    """Validate only the standard, provider-issued Web Push fields we store."""
+    if not isinstance(value, dict) or set(value) - {"endpoint", "keys", "expirationTime"}: return False
+    endpoint, keys = value.get("endpoint"), value.get("keys")
+    if not isinstance(endpoint, str) or not endpoint.startswith("https://") or len(endpoint) > 2048: return False
+    if not isinstance(keys, dict) or set(keys) != {"p256dh", "auth"}: return False
+    return all(isinstance(keys.get(name), str) and 1 <= len(keys[name]) <= 1024 and re.fullmatch(r"[A-Za-z0-9_-]+", keys[name]) for name in ("p256dh", "auth"))
+
+@app.route("/messaging/api/push-subscriptions", methods=["POST", "DELETE"])
+@login_required
+def messaging_push_subscriptions():
+    require_csrf(); payload = request.get_json(silent=True) or {}
+    if request.method == "POST":
+        subscription = payload.get("subscription")
+        if not valid_push_subscription(subscription): abort(400)
+        messaging_request(f"push-subscribe-{secrets.token_hex(12)}.json", {"subscription": subscription})
+    else:
+        endpoint = payload.get("endpoint")
+        if not isinstance(endpoint, str) or not endpoint.startswith("https://") or len(endpoint) > 2048: abort(400)
+        # This request names precisely the current browser's endpoint; the
+        # service never clears another browser/device's subscription.
+        messaging_request(f"push-unsubscribe-{secrets.token_hex(12)}.json", {"endpoint": endpoint})
+    return "", 202
+
+@app.get("/service-worker.js")
+def service_worker(): return send_from_directory(app.static_folder, "service-worker.js", mimetype="application/javascript")
+
+@app.get("/manifest.webmanifest")
+def web_manifest(): return send_from_directory(app.static_folder, "manifest.webmanifest", mimetype="application/manifest+json")
 
 @app.get("/messaging/api/conversations/<key>")
 @login_required

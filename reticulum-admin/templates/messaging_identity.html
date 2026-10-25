@@ -1,1 +1,109 @@
-{% extends 'base.html' %}{% block content %}<h1>My Identity</h1><p>This is your persistent operator LXMF identity. It is separate from the Bot and does not change when you change its display name.</p><section class="card"><p>Status: {{ 'Running' if status.running else 'Waiting / unavailable' }} · Shared instance: {{ 'Connected' if status.shared_instance_connected else 'Waiting' }} · Router: {{ 'Ready' if status.lxmf_router_ready else 'Waiting' }}<br>Destination: <code>{{ status.destination or 'Not ready yet' }}</code><br>Identity: <code>{{ status.identity or 'Not ready yet' }}</code><br>Last announce: {{ format_time(status.last_announce) }}<br>Application announces observed since startup: {{ status.application_announces_observed or 0 }}<br>Unique application destinations stored: {{ status.unique_application_announce_destinations or 0 }}<br>Delivery: {{ (status.application_announce_counts or {}).get('lxmf.delivery', 0) }} · Propagation: {{ (status.application_announce_counts or {}).get('lxmf.propagation', 0) }} · NomadNet: {{ (status.application_announce_counts or {}).get('nomadnetwork.node', 0) }}<br>Last observed application announce: {{ format_time(status.last_application_announce) }}</p><p class="muted">This service passively records documented public application announces it receives after startup. Display names are informational, not proof of identity; it does not scrape logs or fabricate historical peers.</p><form class="inline" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="announce"><button {% if not status.destination %}disabled{% endif %}>Announce Now</button></form></section><form class="card" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><label><input type="checkbox" name="enabled" {% if settings.enabled %}checked{% endif %}> Enabled</label><label>Display Name<input name="display_name" maxlength="80" value="{{ settings.display_name }}"></label><p class="muted">Some LXMF clients cache names until a later announce or rediscovery. Changing this name does not change the destination hash.</p><label><input type="checkbox" name="announce_on_startup" {% if settings.announce_on_startup %}checked{% endif %}> Announce on startup</label><label><input type="checkbox" name="periodic_announce" {% if settings.periodic_announce %}checked{% endif %}> Periodic announce</label><label>Interval in minutes<input type="number" name="interval_minutes" min="15" value="{{ settings.interval_minutes }}"></label><p class="muted">Minimum interval is 15 minutes. LXMF 0.9.6 does not expose a reliable delivered/read receipt for normal messages.</p><button>Save Identity Settings</button></form>{% endblock %}
+{% extends 'base.html' %}
+{% block content %}
+<h1>My Identity</h1>
+<p>This is your persistent operator LXMF identity. It is separate from the Bot and does not change when you change its display name.</p>
+<section class="card">
+  <p>
+    Status: {{ 'Running' if status.running else 'Waiting / unavailable' }} ·
+    Shared instance: {{ 'Connected' if status.shared_instance_connected else 'Waiting' }} ·
+    Router: {{ 'Ready' if status.lxmf_router_ready else 'Waiting' }}<br>
+    Destination: <code>{{ status.destination or 'Not ready yet' }}</code><br>
+    Identity: <code>{{ status.identity or 'Not ready yet' }}</code><br>
+    Last announce: {{ format_time(status.last_announce) }}<br>
+    Application announces observed since startup: {{ status.application_announces_observed or 0 }}<br>
+    Unique application destinations stored: {{ status.unique_application_announce_destinations or 0 }}<br>
+    Delivery: {{ (status.application_announce_counts or {}).get('lxmf.delivery', 0) }} ·
+    Propagation: {{ (status.application_announce_counts or {}).get('lxmf.propagation', 0) }} ·
+    NomadNet: {{ (status.application_announce_counts or {}).get('nomadnetwork.node', 0) }}<br>
+    Last observed application announce: {{ format_time(status.last_application_announce) }}
+  </p>
+  <p class="muted">This service passively records documented public application announces it receives after startup. Display names are informational, not proof of identity; it does not scrape logs or fabricate historical peers.</p>
+  <form class="inline" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="action" value="announce">
+    <button {% if not status.destination %}disabled{% endif %}>Announce Now</button>
+  </form>
+</section>
+<section class="card" id="notification-settings">
+  <h2>Notifications</h2>
+  <p>Web Push configured: {{ 'Yes' if status.web_push_configured else 'No' }}{% if status.web_push_subject %}<br>VAPID subject: <code>{{ status.web_push_subject }}</code>{% endif %}</p>
+  <p>
+    Last push attempt: {{ format_time(status.last_push_attempt) }}<br>
+    Provider result: {{ status.last_provider_result or 'Not attempted yet' }}{% if status.last_provider_http_status %} · HTTP {{ status.last_provider_http_status }}{% endif %}<br>
+    Last accepted by push provider: {{ format_time(status.last_provider_accepted) }}<br>
+    Push attempts: {{ status.push_attempts or 0 }} · Provider accepts: {{ status.provider_accepts or 0 }} · Provider failures: {{ status.provider_failures or 0 }} · Stale subscriptions removed: {{ status.stale_subscriptions_removed or 0 }}
+  </p>
+  <p id="push-status">Checking browser notification support…</p>
+  <button type="button" id="push-enable">Enable Notifications</button>
+  <button type="button" id="push-disable" hidden>Disable Notifications</button>
+  <p class="muted">Notifications are enabled separately on each browser or Home Screen app. On iOS/iPadOS 16.4 or newer, notifications require the Admin GUI to be installed to the Home Screen.</p>
+  {% if not status.web_push_configured %}<p class="muted">Set a valid HTTPS or mailto <code>WEB_PUSH_VAPID_SUBJECT</code> in the server’s <code>.env</code>, then restart the Messaging service.</p>{% endif %}
+</section>
+<form class="card" method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <label><input type="checkbox" name="enabled" {% if settings.enabled %}checked{% endif %}> Enabled</label>
+  <label>Display Name<input name="display_name" maxlength="80" value="{{ settings.display_name }}"></label>
+  <p class="muted">Some LXMF clients cache names until a later announce or rediscovery. Changing this name does not change the destination hash.</p>
+  <label><input type="checkbox" name="announce_on_startup" {% if settings.announce_on_startup %}checked{% endif %}> Announce on startup</label>
+  <label><input type="checkbox" name="periodic_announce" {% if settings.periodic_announce %}checked{% endif %}> Periodic announce</label>
+  <label>Interval in minutes<input type="number" name="interval_minutes" min="15" value="{{ settings.interval_minutes }}"></label>
+  <p class="muted">Minimum interval is 15 minutes. LXMF 0.9.6 does not expose a reliable delivered/read receipt for normal messages.</p>
+  <button>Save Identity Settings</button>
+</form>
+<script>
+(() => {
+  const enable = document.getElementById("push-enable");
+  const disable = document.getElementById("push-disable");
+  const status = document.getElementById("push-status");
+  const csrf = {{ csrf_token()|tojson }};
+  const publicKey = {{ status.web_push_public_key|tojson }};
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    status.textContent = "Notifications are not supported in this browser.";
+    enable.hidden = true;
+    return;
+  }
+  const keyBytes = value => Uint8Array.from(atob(value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4)), character => character.charCodeAt(0));
+  navigator.serviceWorker.register("/service-worker.js").then(async registration => {
+    let subscription = await registration.pushManager.getSubscription();
+    const show = () => {
+      const permission = Notification.permission;
+      status.textContent = subscription
+        ? `Permission: ${permission}. Notifications are enabled for this device.`
+        : permission === "denied"
+          ? "Permission is denied. Change it in iPhone or browser notification settings."
+          : `Permission: ${permission}. Notifications are disabled for this device.`;
+      enable.hidden = !!subscription || permission === "denied";
+      disable.hidden = !subscription;
+    };
+    show();
+    enable.addEventListener("click", async () => {
+      if (!publicKey) { status.textContent = "Notification service is not ready yet."; return; }
+      if (Notification.permission === "denied") { show(); return; }
+      if (await Notification.requestPermission() !== "granted") { status.textContent = "Permission was not granted."; return; }
+      try {
+        subscription = await registration.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: keyBytes(publicKey)});
+        const response = await fetch("/messaging/api/push-subscriptions", {
+          method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({subscription: subscription.toJSON(), csrf_token: csrf})
+        });
+        if (!response.ok) throw new Error("subscription request rejected");
+        show();
+      } catch (_) { status.textContent = "Notifications could not be enabled on this device."; }
+    });
+    disable.addEventListener("click", async () => {
+      if (!subscription) return;
+      try {
+        const response = await fetch("/messaging/api/push-subscriptions", {
+          method: "DELETE", credentials: "same-origin", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({endpoint: subscription.endpoint, csrf_token: csrf})
+        });
+        if (!response.ok) throw new Error("unsubscribe request rejected");
+        await subscription.unsubscribe();
+        subscription = null;
+        show();
+      } catch (_) { status.textContent = "Notifications could not be disabled on this device."; }
+    });
+  }).catch(() => { status.textContent = "Notifications need trusted HTTPS."; });
+})();
+</script>
+{% endblock %}

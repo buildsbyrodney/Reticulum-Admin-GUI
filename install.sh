@@ -247,6 +247,11 @@ update_local() {
   else
     printf '\nRETICULUM_ADMIN_VERSION=%s\n' "$APP_VERSION" >> "$ROOT/.env"
   fi
+  # A push contact URI is operator-owned. Preserve it across updates; add an
+  # intentionally blank key for older installations rather than guessing one.
+  if ! grep -q '^WEB_PUSH_VAPID_SUBJECT=' "$ROOT/.env"; then
+    printf '\n# Optional HTTPS or mailto contact URI for Web Push VAPID.\nWEB_PUSH_VAPID_SUBJECT=\n' >> "$ROOT/.env"
+  fi
   # Preserve explicit operator tuning, but move values that exactly match the
   # prior shipped defaults to the coordinated v0.5.4 timing hierarchy.
   upgrade_timeout_default() {
@@ -331,6 +336,7 @@ SERVER_TIMEZONE=$SERVER_TIMEZONE
 ADMIN_SECRET_KEY=$ADMIN_SECRET_KEY
 MANAGEMENT_TOKEN=$MANAGEMENT_TOKEN
 RETICULUM_ADMIN_VERSION=$APP_VERSION
+WEB_PUSH_VAPID_SUBJECT=${WEB_PUSH_VAPID_SUBJECT:-}
 EOF
 
 docker_cmd compose up -d --build

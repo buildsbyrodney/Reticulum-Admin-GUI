@@ -14,10 +14,14 @@ messaging = importlib.util.module_from_spec(spec); spec.loader.exec_module(messa
 
 class MessagingServiceTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(); self.old_state, self.old_requests = messaging.STATE, messaging.REQUESTS
+        self.temp = tempfile.TemporaryDirectory(); self.old_state, self.old_requests = messaging.STATE, messaging.REQUESTS; self.old_vapid_subject = os.environ.get("WEB_PUSH_VAPID_SUBJECT")
         messaging.STATE, messaging.REQUESTS = Path(self.temp.name) / "state", Path(self.temp.name) / "requests"
+        os.environ["WEB_PUSH_VAPID_SUBJECT"] = "https://push.example"
     def tearDown(self):
-        messaging.STATE, messaging.REQUESTS = self.old_state, self.old_requests; self.temp.cleanup()
+        messaging.STATE, messaging.REQUESTS = self.old_state, self.old_requests
+        if self.old_vapid_subject is None: os.environ.pop("WEB_PUSH_VAPID_SUBJECT", None)
+        else: os.environ["WEB_PUSH_VAPID_SUBJECT"] = self.old_vapid_subject
+        self.temp.cleanup()
     def test_inbound_message_is_persisted_unread_and_identity_is_separate(self):
         service = messaging.Messaging(); service.destination = types.SimpleNamespace(hash=b"operator")
         source = types.SimpleNamespace(hash=b"sender", display_name="Remote User")
@@ -194,6 +198,102 @@ class MessagingServiceTests(unittest.TestCase):
         service = messaging.Messaging(); service.destination = types.SimpleNamespace(hash=b"operator")
         service.receive(types.SimpleNamespace(source=types.SimpleNamespace(hash=b"sender"), source_hash=b"sender", content_as_string=lambda: "hello"))
         with messaging.connect() as con: self.assertIsNone(con.execute("SELECT * FROM messages").fetchone())
+    def test_web_push_preview_and_subscription_validation_are_safe(self):
+        self.assertEqual(messaging.web_push_preview(" <b>Hello</b>\n [world](https://example.test) *today* "), "Hello world today")
+        self.assertEqual(len(messaging.web_push_preview("x" * 500)), 140)
+        valid = {"endpoint": "https://push.example/subscription", "keys": {"p256dh": "abc_123", "auth": "key-456"}}
+        self.assertTrue(messaging.subscription_is_valid(valid))
+        self.assertFalse(messaging.subscription_is_valid({"endpoint": "http://not-https", "keys": valid["keys"]}))
+        self.assertFalse(messaging.subscription_is_valid({"endpoint": valid["endpoint"], "keys": {"p256dh": "x"}}))
+
+    def test_vapid_subject_accepts_https_or_mailto_and_rejects_localhost_without_fallback(self):
+        os.environ["WEB_PUSH_VAPID_SUBJECT"] = "https://fserver.tail.de88c.ts.net"
+        self.assertEqual(messaging.vapid_subject(), "https://fserver.tail.de88c.ts.net")
+        os.environ["WEB_PUSH_VAPID_SUBJECT"] = "mailto:operator@example.net"
+        self.assertEqual(messaging.vapid_subject(), "mailto:operator@example.net")
+        self.assertEqual(messaging.push_navigate_url("a" * 32), "/messaging/conversations/" + "a" * 32)
+        for invalid in ("", "https://localhost", "https://node.localhost", "http://example.net", "mailto:not-an-address", "not-a-uri"):
+            os.environ["WEB_PUSH_VAPID_SUBJECT"] = invalid
+            self.assertIsNone(messaging.vapid_subject())
+
+    def test_push_uses_configured_subject_and_keeps_existing_key_and_subscription(self):
+        class WebPushException(Exception): pass
+        old = sys.modules.get("pywebpush"); calls = []
+        sys.modules["pywebpush"] = types.SimpleNamespace(WebPushException=WebPushException, webpush=lambda subscription_info, **kwargs: calls.append(kwargs))
+        try:
+            service = messaging.Messaging()
+            key = messaging.STATE / "webpush-vapid.pem"
+            # Substitute a pre-existing key file: send_push never writes or
+            # rotates it, and a stored endpoint stays present after a send.
+            key.parent.mkdir(parents=True, exist_ok=True); key.write_text("existing-key", encoding="utf-8")
+            with messaging.connect() as con: con.execute("INSERT INTO push_subscriptions VALUES(?,?,?,?)", ("https://push.example/device", json.dumps({"endpoint": "https://push.example/device", "keys": {"p256dh": "abc", "auth": "def"}}), 1, 1))
+            os.environ["WEB_PUSH_VAPID_SUBJECT"] = "https://fserver.tail.de88c.ts.net"
+            service.send_push("Remote", "hello", "a" * 32)
+            self.assertEqual(calls[0]["vapid_claims"], {"sub": "https://fserver.tail.de88c.ts.net"})
+            payload = json.loads(calls[0]["data"])
+            self.assertEqual(payload["web_push"], 8030)
+            self.assertEqual(payload["notification"]["title"], "Remote")
+            self.assertEqual(payload["notification"]["navigate"], "https://fserver.tail.de88c.ts.net/messaging/conversations/" + "a" * 32)
+            self.assertEqual(payload["app_badge"], "0")
+            self.assertEqual(service.state["last_provider_result"], "Accepted")
+            self.assertEqual(service.state["last_provider_http_status"], 201)
+            self.assertEqual(service.state["provider_accepts"], 1)
+            service.status()
+            status = json.loads((messaging.STATE / "status.json").read_text(encoding="utf-8"))
+            self.assertNotIn("https://push.example/device", json.dumps(status))
+            self.assertNotIn("existing-key", json.dumps(status))
+            restarted = messaging.Messaging()
+            self.assertEqual(restarted.state["provider_accepts"], 1)
+            self.assertEqual(restarted.state["last_provider_result"], "Accepted")
+            self.assertEqual(key.read_text(encoding="utf-8"), "existing-key")
+            with messaging.connect() as con: self.assertEqual(con.execute("SELECT count(*) FROM push_subscriptions").fetchone()[0], 1)
+            os.environ["WEB_PUSH_VAPID_SUBJECT"] = "https://localhost"
+            service.send_push("Remote", "hello", "a" * 32)
+            self.assertEqual(len(calls), 1)
+            self.assertIn("WEB_PUSH_VAPID_SUBJECT", service.state["last_error"])
+        finally:
+            if old is None: sys.modules.pop("pywebpush", None)
+            else: sys.modules["pywebpush"] = old
+
+    def test_web_push_stale_subscription_is_removed_but_transient_failure_is_retained(self):
+        class Response: status_code = 410
+        class WebPushException(Exception):
+            def __init__(self, status): self.response = types.SimpleNamespace(status_code=status)
+        old = sys.modules.get("pywebpush")
+        calls = []
+        def webpush(subscription_info, **kwargs):
+            calls.append(subscription_info["endpoint"])
+            if subscription_info["endpoint"].endswith("gone"): raise WebPushException(410)
+            if subscription_info["endpoint"].endswith("gone404"): raise WebPushException(404)
+            raise WebPushException(503)
+        sys.modules["pywebpush"] = types.SimpleNamespace(WebPushException=WebPushException, webpush=webpush)
+        try:
+            service = messaging.Messaging()
+            for endpoint in ("https://push.example/gone", "https://push.example/gone404", "https://push.example/temporary"):
+                messaging.atomic_json(messaging.REQUESTS / ("push-subscribe-" + endpoint.rsplit("/", 1)[1] + ".json"), {"subscription": {"endpoint": endpoint, "keys": {"p256dh": "abc", "auth": "def"}}})
+            service.process_requests(); service.send_push("Remote", "hello", "a" * 32)
+            with messaging.connect() as con: endpoints = {row[0] for row in con.execute("SELECT endpoint FROM push_subscriptions")}
+            self.assertEqual(calls, ["https://push.example/gone", "https://push.example/gone404", "https://push.example/temporary"])
+            self.assertNotIn("https://push.example/gone", endpoints)
+            self.assertNotIn("https://push.example/gone404", endpoints)
+            self.assertIn("https://push.example/temporary", endpoints)
+            self.assertEqual(service.state["last_provider_result"], "Rejected")
+            self.assertEqual(service.state["last_provider_http_status"], 503)
+            self.assertEqual(service.state["stale_subscriptions_removed"], 2)
+            self.assertEqual(service.state["provider_failures"], 3)
+        finally:
+            if old is None: sys.modules.pop("pywebpush", None)
+            else: sys.modules["pywebpush"] = old
+
+    def test_duplicate_hashed_inbound_message_pushes_once(self):
+        pushed = []
+        service = messaging.Messaging(); service.destination = types.SimpleNamespace(hash=b"operator")
+        service.send_push = lambda *args: pushed.append(args)
+        source = types.SimpleNamespace(hash=b"sender", display_name="Remote")
+        message = types.SimpleNamespace(source=source, source_hash=b"sender", hash=b"stable-message", content_as_string=lambda: "hello")
+        service.receive(message); service.receive(message)
+        with messaging.connect() as con: self.assertEqual(con.execute("SELECT count(*) FROM messages").fetchone()[0], 1)
+        self.assertEqual(len(pushed), 1)
     def test_destination_is_exactly_32_hex_characters(self):
         self.assertTrue(messaging.DESTINATION_RE.fullmatch("a" * 32)); self.assertFalse(messaging.DESTINATION_RE.fullmatch("a" * 64))
     def test_path_resolution_timeout_records_route_unavailable(self):
@@ -368,7 +468,13 @@ class MessagingWebContractTests(unittest.TestCase):
         inbox = (ROOT / "reticulum-admin" / "templates" / "messaging.html").read_text(encoding="utf-8")
         compose = (ROOT / "reticulum-admin" / "templates" / "messaging_new.html").read_text(encoding="utf-8")
         identity = (ROOT / "reticulum-admin" / "templates" / "messaging_identity.html").read_text(encoding="utf-8")
+        worker = (ROOT / "reticulum-admin" / "static" / "service-worker.js").read_text(encoding="utf-8")
+        offline = (ROOT / "reticulum-admin" / "static" / "offline.html").read_text(encoding="utf-8")
+        manifest = (ROOT / "reticulum-admin" / "static" / "manifest.webmanifest").read_text(encoding="utf-8")
         self.assertIn("Messaging", base); self.assertIn("messaging_unread", base); self.assertIn("Conversations", inbox); self.assertIn("Announces", inbox); self.assertIn("message-bubble", inbox); self.assertIn("maxlength=\"4000\"", inbox); self.assertNotIn("Add Files", inbox); self.assertNotIn("Add Image", inbox); self.assertNotIn("Add Voice", inbox); self.assertIn("separate from the Bot", identity)
+        self.assertIn("Notifications", identity); self.assertIn("Enable Notifications", identity); self.assertIn("Disable Notifications", identity); self.assertIn("Web Push configured", identity); self.assertIn("WEB_PUSH_VAPID_SUBJECT", identity)
+        self.assertIn('"display":"standalone"', manifest); self.assertIn("notificationclick", worker); self.assertIn("payload.notification", worker); self.assertIn("notification.navigate", worker); self.assertIn("showNotification", worker); self.assertIn("foreground-unread", worker); self.assertIn("setAppBadge", worker); self.assertNotIn("webpush-vapid.pem", worker)
+        self.assertIn("Connect Tailscale, then tap Retry.", offline); self.assertIn("target", offline); self.assertIn("fetch(target", offline)
 
     def test_chat_layout_has_responsive_mobile_and_plain_text_contracts(self):
         style = (ROOT / "reticulum-admin" / "static" / "app.css").read_text(encoding="utf-8")
@@ -414,6 +520,9 @@ class MessagingWebContractTests(unittest.TestCase):
                 sys.path.insert(0, str(ROOT / "reticulum-admin"))
                 app_spec = importlib.util.spec_from_file_location("messaging_workspace_app", ROOT / "reticulum-admin" / "app.py")
                 app_module = importlib.util.module_from_spec(app_spec); app_spec.loader.exec_module(app_module)
+                # The dynamic test import has no package root; point Flask at
+                # the real static directory before exercising the PWA routes.
+                app_module.app.static_folder = str(ROOT / "reticulum-admin" / "static")
                 rows = app_module.messaging_conversations()
                 self.assertEqual([row["conversation_key"] for row in rows], ["a" * 32, "b" * 32])
                 self.assertEqual(rows[0]["body"], "newest preview")
@@ -433,6 +542,9 @@ class MessagingWebContractTests(unittest.TestCase):
                 anonymous = app_module.app.test_client()
                 self.assertEqual(anonymous.post("/messaging/api/conversations/" + "a" * 32 + "/read").status_code, 302)
                 client = app_module.app.test_client()
+                self.assertEqual(client.get("/manifest.webmanifest").status_code, 200)
+                self.assertEqual(client.get("/service-worker.js").status_code, 200)
+                self.assertEqual(client.get("/static/offline.html").status_code, 200)
                 self.assertEqual(client.get("/messaging/api/conversations/" + "a" * 32).status_code, 302)
                 with client.session_transaction() as session:
                     session["admin"] = "test-admin"
@@ -449,6 +561,17 @@ class MessagingWebContractTests(unittest.TestCase):
                 self.assertEqual(client.post("/messaging/api/conversations/" + "a" * 32 + "/read").status_code, 400)
                 with client.session_transaction() as session:
                     session["csrf"] = "read-csrf"
+                subscription = {"endpoint": "https://push.example/current-device", "keys": {"p256dh": "abc_123", "auth": "def_456"}}
+                self.assertEqual(client.post("/messaging/api/push-subscriptions", json={"subscription": subscription}).status_code, 400)
+                self.assertEqual(client.post("/messaging/api/push-subscriptions", json={"subscription": subscription, "csrf_token": "read-csrf"}).status_code, 202)
+                subscribe_files = list((Path(temporary) / "requests").glob("push-subscribe-*.json"))
+                self.assertEqual(len(subscribe_files), 1)
+                self.assertEqual(json.loads(subscribe_files[0].read_text())["subscription"]["endpoint"], subscription["endpoint"])
+                self.assertEqual(client.delete("/messaging/api/push-subscriptions", json={"endpoint": subscription["endpoint"], "csrf_token": "read-csrf"}).status_code, 202)
+                unsubscribe_files = list((Path(temporary) / "requests").glob("push-unsubscribe-*.json"))
+                self.assertEqual(len(unsubscribe_files), 1)
+                self.assertEqual(json.loads(unsubscribe_files[0].read_text())["endpoint"], subscription["endpoint"])
+                self.assertEqual(client.post("/messaging/api/push-subscriptions", json={"subscription": {"endpoint": "https://x", "keys": {"p256dh": "", "auth": "x"}}, "csrf_token": "read-csrf"}).status_code, 400)
                 self.assertEqual(client.post("/messaging/api/conversations/" + "a" * 32 + "/read", data={"csrf_token": "wrong"}).status_code, 400)
                 self.assertEqual(client.post("/messaging/api/conversations/" + "a" * 32 + "/read", data={"csrf_token": "read-csrf"}).status_code, 204)
                 request_file = Path(temporary) / "requests" / ("read-" + "a" * 32 + ".json")

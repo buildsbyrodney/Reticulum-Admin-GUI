@@ -97,14 +97,19 @@ docker exec "$rnsd_container" rnstatus --config /root/.reticulum | grep -Eq 'Ser
 # The operator Messaging endpoint is a separate shared-instance client. Its
 # identity is persistent and must not collapse into the bot destination.
 docker run -d --name "$messaging_container" --network host \
-  -e MESSAGING_STATE_DIR=/messaging -e MESSAGING_REQUEST_DIR=/requests -e MESSAGING_PATH_LOOKUP_SECONDS=1 \
+  -e MESSAGING_STATE_DIR=/messaging -e MESSAGING_REQUEST_DIR=/requests -e MESSAGING_PATH_LOOKUP_SECONDS=1 -e WEB_PUSH_VAPID_SUBJECT=https://push.example \
   -v "$state:/reticulum:ro" -v "$messaging_state:/messaging" -v "$messaging_requests:/requests" "$messaging_image" >/dev/null
 if ! wait_for 35 sh -c "test -s '$messaging_state/status.json' && grep -q '\"running\": true' '$messaging_state/status.json'"; then
   docker logs "$messaging_container" >&2 || true
   echo "Messaging service did not attach to the rnsd shared instance" >&2
   exit 1
 fi
+docker exec "$messaging_container" python -c "import pywebpush, messaging; assert callable(pywebpush.webpush); assert messaging.STATE == __import__('pathlib').Path('/messaging')"
+test -s "$messaging_state/webpush-vapid.pem"
+test "$(stat -c '%a' "$messaging_state/webpush-vapid.pem")" = "600"
+python3 -c "import json; value=json.load(open('$messaging_state/status.json')); encoded=json.dumps(value); assert value.get('web_push_public_key') and value.get('web_push_configured') and value.get('web_push_subject') == 'https://push.example' and 'webpush-vapid.pem' not in encoded and 'BEGIN PRIVATE' not in encoded"
 messaging_destination_before=$(python3 -c "import json; print(json.load(open('$messaging_state/status.json'))['destination'])")
+vapid_fingerprint_before=$(sha256sum "$messaging_state/webpush-vapid.pem" | awk '{print $1}')
 test "$messaging_destination_before" != "$bot_destination_after"
 # The running service registers the passive lxmf.delivery listener. Inject a
 # supported-format display-name payload through the packaged service helper;
@@ -156,6 +161,7 @@ if ! wait_for 35 sh -c "test -s '$messaging_state/status.json' && grep -q '\"run
 fi
 messaging_destination_after=$(python3 -c "import json; print(json.load(open('$messaging_state/status.json'))['destination'])")
 test "$messaging_destination_before" = "$messaging_destination_after"
+test "$vapid_fingerprint_before" = "$(sha256sum "$messaging_state/webpush-vapid.pem" | awk '{print $1}')"
 python3 -c "import sqlite3; row=sqlite3.connect('$messaging_state/messages.db').execute(\"select destination_hash from announced_peers where destination_hash='abcdef0123456789abcdef0123456789'\").fetchone(); assert row"
 python3 -c "import sqlite3; con=sqlite3.connect('$messaging_state/messages.db'); assert con.execute(\"select count(*) from application_announces where aspect in ('nomadnetwork.node','lxmf.propagation')\").fetchone()[0] == 2"
 if ! wait_for 15 python3 -c "import sqlite3; row=sqlite3.connect('$messaging_state/messages.db').execute(\"select delivery_state from messages where id='recovery-test'\").fetchone(); assert row and row[0] == 'Failed'"; then
