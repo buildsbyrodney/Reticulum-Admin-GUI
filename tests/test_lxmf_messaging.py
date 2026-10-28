@@ -198,6 +198,23 @@ class MessagingServiceTests(unittest.TestCase):
         service = messaging.Messaging(); service.destination = types.SimpleNamespace(hash=b"operator")
         service.receive(types.SimpleNamespace(source=types.SimpleNamespace(hash=b"sender"), source_hash=b"sender", content_as_string=lambda: "hello"))
         with messaging.connect() as con: self.assertIsNone(con.execute("SELECT * FROM messages").fetchone())
+
+    def test_failed_outbound_delete_is_owner_scoped_and_never_deletes_delivered_rows(self):
+        service = messaging.Messaging()
+        with messaging.connect() as con:
+            con.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", ("f" * 32, "a" * 32, "outbound", "operator", "a" * 32, None, "failed", 1, None, "Failed", "failure", 1, 1))
+            con.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", ("d" * 32, "a" * 32, "outbound", "operator", "a" * 32, None, "delivered", 1, None, "Delivered", None, 1, 1))
+            con.execute("INSERT INTO message_owners(message_id,owner,created_at) VALUES(?,?,?)", ("f" * 32, "alice", 1))
+            con.execute("INSERT INTO message_owners(message_id,owner,created_at) VALUES(?,?,?)", ("d" * 32, "alice", 1))
+        messaging.atomic_json(messaging.REQUESTS / "delete-failed-owner.json", {"id": "f" * 32, "owner": "mallory"})
+        messaging.atomic_json(messaging.REQUESTS / "delete-failed-delivered.json", {"id": "d" * 32, "owner": "alice"})
+        service.process_requests()
+        with messaging.connect() as con:
+            self.assertIsNotNone(con.execute("SELECT 1 FROM messages WHERE id=?", ("f" * 32,)).fetchone())
+            self.assertIsNotNone(con.execute("SELECT 1 FROM messages WHERE id=?", ("d" * 32,)).fetchone())
+        messaging.atomic_json(messaging.REQUESTS / "delete-failed-owner.json", {"id": "f" * 32, "owner": "alice"})
+        service.process_requests()
+        with messaging.connect() as con: self.assertIsNone(con.execute("SELECT 1 FROM messages WHERE id=?", ("f" * 32,)).fetchone())
     def test_web_push_preview_and_subscription_validation_are_safe(self):
         self.assertEqual(messaging.web_push_preview(" <b>Hello</b>\n [world](https://example.test) *today* "), "Hello world today")
         self.assertEqual(len(messaging.web_push_preview("x" * 500)), 140)

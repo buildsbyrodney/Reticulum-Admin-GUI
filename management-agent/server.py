@@ -2,6 +2,7 @@ import json, os, secrets
 from flask import Flask, abort, jsonify, request
 from management import ALLOWED, capabilities, run
 import configuration
+import features
 
 app = Flask(__name__); TOKEN = os.environ.get("MANAGEMENT_TOKEN", ""); CONFIG = os.environ.get("RETICULUM_DIR", "/reticulum")
 def auth():
@@ -14,6 +15,13 @@ def help_text():
     except (OSError, json.JSONDecodeError): return ""
 @app.get("/capabilities")
 def get_capabilities(): auth(); return jsonify({"capabilities":capabilities(help_text())})
+@app.get("/features")
+def get_features(): auth(); return jsonify({"ok": True, **features.public_state()})
+@app.post("/features/apply")
+def apply_features():
+    auth(); body=request.get_json(silent=True) or {}
+    try: return jsonify(features.apply(body.get("enabled"), body.get("admin", "admin")))
+    except ValueError as error: return jsonify({"ok":False,"error":str(error)}),400
 @app.post("/execute")
 def execute():
     auth(); body=request.get_json(silent=True) or {}; operation=body.get("operation")

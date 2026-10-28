@@ -55,6 +55,7 @@ def connect():
     con = sqlite3.connect(STATE / "messages.db"); con.row_factory = sqlite3.Row; con.execute("PRAGMA journal_mode=WAL")
     con.executescript("""
       CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, conversation_key TEXT NOT NULL, direction TEXT NOT NULL, sender_destination TEXT, recipient_destination TEXT, sender_name TEXT, body TEXT NOT NULL, received_at INTEGER NOT NULL, read_at INTEGER, delivery_state TEXT NOT NULL, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS message_owners (message_id TEXT PRIMARY KEY, owner TEXT NOT NULL, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS contacts (id INTEGER PRIMARY KEY, name TEXT NOT NULL, destination TEXT NOT NULL UNIQUE, notes TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS announced_peers (destination_hash TEXT PRIMARY KEY, identity_hash TEXT, display_name TEXT, message_display_name TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, last_hops INTEGER, announce_count INTEGER NOT NULL DEFAULT 1);
       CREATE TABLE IF NOT EXISTS application_announces (destination_hash TEXT NOT NULL, aspect TEXT NOT NULL, identity_hash TEXT, display_name TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, last_hops INTEGER, announce_count INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(destination_hash, aspect));
@@ -298,6 +299,8 @@ class Messaging:
                 return False
             else:
                 con.execute("INSERT INTO messages(id,conversation_key,direction,sender_destination,recipient_destination,body,received_at,delivery_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (message_id, target.lower(), "outbound", self.destination.hash.hex() if self.destination else None, target.lower(), body, stamp, "Pending", stamp, stamp))
+                owner = str(item.get("owner") or "")[:80]
+                if owner: con.execute("INSERT INTO message_owners(message_id,owner,created_at) VALUES(?,?,?)", (message_id, owner, stamp))
         if not DESTINATION_RE.fullmatch(target) or not body.strip():
             self.update_outbound(message_id, "Failed", "Stored outbound message is invalid.")
             return True
@@ -350,6 +353,16 @@ class Messaging:
 
     def process_requests(self):
         self.process_announce_clear_requests()
+        for request in sorted(REQUESTS.glob("delete-failed-*.json")):
+            try: item = json.loads(request.read_text(encoding="utf-8")); message_id, owner = item["id"], item["owner"]
+            except (OSError, json.JSONDecodeError, KeyError, TypeError): continue
+            # The service, not the web app, authorizes the destructive write.
+            # Legacy rows without a recorded owner are intentionally retained.
+            if isinstance(message_id, str) and re.fullmatch(r"[0-9a-f]{32}", message_id) and isinstance(owner, str) and owner:
+                with connect() as con:
+                    con.execute("DELETE FROM messages WHERE id=? AND direction='outbound' AND delivery_state='Failed' AND EXISTS (SELECT 1 FROM message_owners WHERE message_id=messages.id AND owner=?)", (message_id, owner[:80]))
+                    con.execute("DELETE FROM message_owners WHERE message_id=? AND owner=?", (message_id, owner[:80]))
+                request.unlink(missing_ok=True)
         for request in sorted(REQUESTS.glob("push-subscribe-*.json")):
             try: item=json.loads(request.read_text()); sub=item["subscription"]; endpoint=sub["endpoint"]
             except (OSError,json.JSONDecodeError,KeyError,TypeError): continue
