@@ -27,6 +27,11 @@ LINK_TIMEOUT_SECONDS = max(3, min(45, int(os.environ.get("NOMAD_LINK_TIMEOUT_SEC
 REQUEST_TIMEOUT_SECONDS = max(3, min(45, int(os.environ.get("NOMAD_REQUEST_TIMEOUT_SECONDS", "20"))))
 IDENTITY_FILE = "identity"
 
+def settings():
+    try: value = json.loads((REQUESTS / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError): value = {}
+    return {"enabled": bool(value.get("enabled", True))} if isinstance(value, dict) else {"enabled": True}
+
 
 def atomic_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -252,7 +257,9 @@ class NomadBrowser:
                     time.sleep(5)
                     continue
                 self.state["last_error"] = None
-                self.process_requests(RNS)
+                # Disable preserves cached pages and the browser identity; it
+                # simply declines new network fetches until re-enabled.
+                if settings()["enabled"]: self.process_requests(RNS)
                 self.status(True)
                 time.sleep(1)
             except Exception:

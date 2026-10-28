@@ -189,9 +189,9 @@ def messaging_peer(key):
     rows = messaging_rows("SELECT p.*, c.name AS contact_name, COALESCE(p.display_name,p.message_display_name) AS peer_name FROM announced_peers p LEFT JOIN contacts c ON c.destination=p.destination_hash WHERE p.destination_hash=?", (key,))
     return rows[0] if rows else None
 def messaging_conversation_rows(key):
-    return messaging_rows("SELECT * FROM (SELECT * FROM messages WHERE conversation_key=? ORDER BY received_at DESC,id DESC LIMIT 200) ORDER BY received_at,id", (key,))
+    return messaging_rows("SELECT * FROM (SELECT messages.*, message_owners.owner FROM messages LEFT JOIN message_owners ON message_owners.message_id=messages.id WHERE conversation_key=? ORDER BY received_at DESC,id DESC LIMIT 200) ORDER BY received_at,id", (key,))
 def messaging_message_json(row):
-    return {"id": row["id"], "direction": row["direction"], "body": row["body"], "timestamp": format_time(row["received_at"]), "delivery_state": row["delivery_state"], "error": row["error"] if row["delivery_state"] == "Failed" else None}
+    return {"id": row["id"], "direction": row["direction"], "body": row["body"], "timestamp": format_time(row["received_at"]), "delivery_state": row["delivery_state"], "error": row["error"] if row["delivery_state"] == "Failed" else None, "can_delete": row["direction"] == "outbound" and row["delivery_state"] == "Failed" and row.get("owner") == session.get("admin")}
 def messaging_workspace_json(tab="conversations", search=""):
     conversations = messaging_conversations(search) if tab == "conversations" else messaging_conversations()
     peers = messaging_announced_peers(search) if tab == "announces" else messaging_announced_peers()
@@ -202,6 +202,7 @@ def messaging_workspace(tab="conversations", selected=None, search=""):
     messages = messaging_conversation_rows(selected) if selected else []
     contact_rows = messaging_rows("SELECT * FROM contacts WHERE destination=?", (selected,)) if selected else []
     peer = messaging_peer(selected) if selected else None
+    for row in messages: row["can_delete"] = row["direction"] == "outbound" and row["delivery_state"] == "Failed" and row.get("owner") == session.get("admin")
     return {"tab": tab, "search": search, "conversations": conversations, "peers": peers, "selected": selected, "rows": messages, "contact": contact_rows[0] if contact_rows else None, "peer": peer, "status": messaging_status(), "short_destination": short_destination}
 def valid_destination(value): return bool(re.fullmatch(r"[0-9a-fA-F]{32}", value or ""))
 def messaging_request(name, value): atomic_json(MESSAGING_REQUEST_DIR / name, value)
@@ -791,6 +792,22 @@ def management(path, body=None, timeout=None):
         return {"ok":False, "unknown":True, "error":"The management operation did not return a usable result. Reticulum may still have applied the change. Check current status before retrying.", "technical_error":str(error)}
     except (urllib.error.URLError, json.JSONDecodeError, ValueError, OSError) as error:
         return {"ok":False, "unknown":True, "error":"The management operation did not return a usable result. Reticulum may still have applied the change. Check current status before retrying.", "technical_error":str(error)}
+
+@app.route("/features", methods=["GET", "POST"])
+@login_required
+def features():
+    if request.method == "POST":
+        require_csrf()
+        current = management("/features")
+        if not current.get("ok"):
+            flash(current.get("error", "Feature service is unavailable."), "error")
+            return redirect(url_for("features"))
+        enabled = {item["id"]: request.form.getlist("feature_" + item["id"])[-1] == "on" for item in current.get("features", [])}
+        result = management("/features/apply", {"enabled": enabled, "admin": session.get("admin", "admin")})
+        flash("Feature activation policy applied; existing service data was preserved." if result.get("ok") else result.get("error", "Feature update failed; the prior policy remains in effect."), "success" if result.get("ok") else "error")
+        return redirect(url_for("features"))
+    result = management("/features")
+    return render_template("features.html", title="Features & Services", features=result.get("features", []), error=None if result.get("ok") else result.get("error"))
 
 def record_config_change(result, change):
     diff = result.get("diff") or []; setting = change.get("setting") or change.get("name") or (change.get("interface") or {}).get("name") or "snapshot restore"
@@ -1635,7 +1652,7 @@ def messaging_new():
             message_id = candidate.lower() if re.fullmatch(r"[0-9a-fA-F]{32}", candidate) else secrets.token_hex(16)
             # The service owns delivery and records its outcome. The web app
             # only creates an intentionally narrow outbound request.
-            messaging_request(f"outbound-{message_id}.json", {"id": message_id, "destination": destination, "body": body})
+            messaging_request(f"outbound-{message_id}.json", {"id": message_id, "destination": destination, "body": body, "owner": session.get("admin")})
             flash("Message queued for the Messaging service. Delivery is not confirmed yet.", "success")
             return redirect(url_for("messaging_conversation", key=destination))
     contacts = messaging_rows("SELECT * FROM contacts ORDER BY name COLLATE NOCASE")
@@ -1653,7 +1670,7 @@ def messaging_conversation(key):
         else:
             candidate = request.form.get("message_id", "")
             message_id = candidate.lower() if re.fullmatch(r"[0-9a-fA-F]{32}", candidate) else secrets.token_hex(16)
-            messaging_request(f"outbound-{message_id}.json", {"id": message_id, "destination": key, "body": body})
+            messaging_request(f"outbound-{message_id}.json", {"id": message_id, "destination": key, "body": body, "owner": session.get("admin")})
             flash("Reply queued. It may remain queued until Reticulum has a route.", "success")
             return redirect(url_for("messaging_conversation", key=key, tab=tab))
     context = messaging_workspace(tab=tab, selected=key)
@@ -1662,6 +1679,17 @@ def messaging_conversation(key):
         # sole writer to the message database, so mark-read is a request too.
         messaging_request(f"read-{key}.json", {"conversation_key": key})
     return render_template("messaging.html", title="Conversation", **context)
+
+@app.post("/messaging/messages/<message_id>/delete")
+@login_required
+def messaging_delete_failed(message_id):
+    require_csrf()
+    if not re.fullmatch(r"[0-9a-f]{32}", message_id): abort(404)
+    rows = messaging_rows("SELECT messages.id,messages.conversation_key,messages.direction,messages.delivery_state,message_owners.owner FROM messages LEFT JOIN message_owners ON message_owners.message_id=messages.id WHERE messages.id=?", (message_id,))
+    if not rows or rows[0]["direction"] != "outbound" or rows[0]["delivery_state"] != "Failed" or rows[0].get("owner") != session.get("admin"): abort(404)
+    messaging_request(f"delete-failed-{message_id}.json", {"id": message_id, "owner": session.get("admin")})
+    flash("Failed message deletion requested. This cannot affect messages owned by another administrator.", "success")
+    return redirect(url_for("messaging_conversation", key=rows[0]["conversation_key"]))
 
 @app.route("/messaging/contacts", methods=["GET", "POST"])
 @login_required

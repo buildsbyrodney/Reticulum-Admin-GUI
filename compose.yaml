@@ -40,6 +40,10 @@ services:
       MANAGEMENT_TOKEN: ${MANAGEMENT_TOKEN:?Set MANAGEMENT_TOKEN in .env}
       RETICULUM_ADMIN_VERSION: ${RETICULUM_ADMIN_VERSION:-0.9.4}
       RETICULUM_DIR: /reticulum
+      FEATURE_STATE_DIR: /feature-services
+      BOT_CONFIG_DIR: /bot-config
+      MESSAGING_REQUEST_DIR: /messaging-requests
+      NOMAD_REQUEST_DIR: /nomad-requests
       # One Pi candidate can fail and be relaunched before it owns the shared
       # instance. A full apply and a possible verified rollback fit inside the
       # explicit 170-second agent and 180-second web request budgets.
@@ -49,6 +53,10 @@ services:
     volumes:
       # The management agent is the sole config writer. The web UI remains read-only.
       - ./data/reticulum:/reticulum
+      - ./data/feature-services:/feature-services
+      - ./data/bot-config:/bot-config
+      - ./data/messaging-requests:/messaging-requests
+      - ./data/nomad-requests:/nomad-requests
     networks: [management]
 
   reticulum-admin:
@@ -83,6 +91,7 @@ services:
       - ./data/messaging-requests:/messaging-requests
       - ./data/nomad:/nomad:ro
       - ./data/nomad-requests:/nomad-requests
+      - ./data/feature-services:/feature-services:ro
     networks: [default, management]
 
   lxmf-test-bot:

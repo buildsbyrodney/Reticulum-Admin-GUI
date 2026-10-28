@@ -1,0 +1,13 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Features &amp; Services</h1>
+<p>Choose optional capabilities, then apply once. Core Reticulum is always required. Disabling a capability stops its application activity but preserves its identity, messages, cache, and configuration. This first release does not stop containers or alter host networking.</p>
+{% if error %}<p class="flash error">{{ error }}</p>{% elif features %}
+<form method="post" class="card"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  {% for feature in features %}<section class="card"><input type="hidden" name="feature_{{ feature.id }}" value="{{ 'on' if feature.mandatory else 'off' }}"><label><input type="checkbox" name="feature_{{ feature.id }}" value="on" {% if feature.enabled %}checked{% endif %} {% if feature.mandatory or not feature.available %}disabled{% endif %}> <strong>{{ feature.title }}</strong></label>
+  <p>{% if feature.mandatory %}Required core service.{% elif not feature.available %}Planned; not yet available to activate.{% else %}Optional service.{% endif %}{% if feature.depends_on %} Requires: {{ feature.depends_on|join(', ') }}.{% endif %}</p></section>{% endfor %}
+  <button type="submit">Apply selected features</button>
+</form>
+<p class="muted">A validated apply stores a rollback snapshot before changing feature policy. Data deletion is never part of enable or disable.</p>
+{% endif %}
+{% endblock %}
